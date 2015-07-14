@@ -6,6 +6,7 @@ import (
 	"github.com/masone/ogn/aprs"
 	"github.com/masone/ogn/ddb"
 	"github.com/masone/ogn/flarm"
+	"github.com/masone/ogn/startlist"
 )
 
 type Beacon struct {
@@ -16,6 +17,7 @@ type Beacon struct {
 
 func main() {
 	ddb.Download()
+	startlist.Init()
 	aprs.Listen(process_message)
 }
 
@@ -27,10 +29,16 @@ func process_message(p *fap.Packet) {
 
 	if ok {
 		b = Beacon{Packet: p, Comment: c, Aircraft: a}
+		if b.Comment.Id != "" && a.Callsign != "" {
+			startlist.ProcessEntry(b.Comment.Id, b.Aircraft.Callsign, b.Packet.Latitude, b.Packet.Longitude, b.Packet.Altitude)
+		}
 	} else {
 		b = Beacon{Packet: p, Comment: c}
 	}
 
-	fmt.Printf("%+v", b)
 	//fmt.Printf("%+v", b)
+}
+
+func (b Beacon) String() string {
+	return fmt.Sprintf("%s (%s/%s) @%f,%f %fm\n", b.Comment.Id, b.Aircraft.Callsign, b.Aircraft.Registration, b.Packet.Latitude, b.Packet.Longitude, b.Altitude)
 }

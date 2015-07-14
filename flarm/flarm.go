@@ -12,7 +12,6 @@ type Comment struct {
 	Rotation       string
 	Fpm            string
 	Errors         string
-	Gps            string
 }
 
 // example comment: id02DF0A52 -019fpm +0.0rot 55.2dB 0e -9.9kHz gps3x6
@@ -28,8 +27,7 @@ func ParseComment(c string) Comment {
 		Rotation:       items[2],
 		SignalStrength: items[3],
 		Errors:         items[4],
-		Frequency:      items[5],
-		Gps:            items[6]}
+		Frequency:      items[5]}
 
 	return comment
 }
