@@ -1,5 +1,5 @@
 *.o
 *.a
 *.so
-.vendor
 /tmp
+ogn

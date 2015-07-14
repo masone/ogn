@@ -9,18 +9,18 @@ import (
 	"time"
 )
 
-const (
-	Host     = os.Getenv("INFLUX_HOST")
-	Port     = os.Getenv("INFLUX_PORT")
-	DB       = os.Getenv("INFLUX_DATABASE")
-	Username = os.Getenv("INFLUX_USERNAME")
-	Password = os.Getenv("INFLUX_PASSWORD")
+var (
+	Host     string = os.Getenv("INFLUX_HOST")
+	Port     string = os.Getenv("INFLUX_PORT")
+	DB       string = os.Getenv("INFLUX_DATABASE")
+	Username string = os.Getenv("INFLUX_USERNAME")
+	Password string = os.Getenv("INFLUX_PASSWORD")
 )
 
 var connection *influxdb.Client
 
 func Init() {
-	u, err := url.Parse(fmt.Sprintf("http://%s:%d", Host, Port))
+	u, err := url.Parse(fmt.Sprintf("http://%s:%s", Host, Port))
 	if err != nil {
 		log.Fatal(err)
 	}
