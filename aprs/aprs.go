@@ -7,6 +7,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"os"
 	"strings"
 	"time"
 )
@@ -30,7 +31,13 @@ func connect() net.Conn {
 }
 
 func authenticate(c net.Conn) {
-	fmt.Fprintf(c, "user SGW134975 pass -1 vers libfapGo 0.0.1 filter r/46.8333/8.3333/200\n")
+	auth := fmt.Sprintf("user %s pass -1 vers libfapGo 0.0.1 filter r/%s/%s/%s\n",
+		os.Getenv("APRS_USER"),
+		os.Getenv("AF_LAT"),
+		os.Getenv("AF_LNG"),
+		os.Getenv("APRS_RADIUS"),
+	)
+	fmt.Fprintf(c, auth)
 }
 
 func keepalive(c net.Conn) {
@@ -38,7 +45,7 @@ func keepalive(c net.Conn) {
 
 	go func() {
 		for t := range ticker.C {
-			fmt.Fprintf(c, "# SGW keepalive %s\n", t)
+			fmt.Fprintf(c, "# libfapGo keepalive %s\n", t)
 		}
 	}()
 }

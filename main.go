@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/martinhpedersen/libfap-go"
 	"github.com/masone/ogn/aprs"
+	"github.com/masone/ogn/config"
 	"github.com/masone/ogn/ddb"
 	"github.com/masone/ogn/flarm"
 	"github.com/masone/ogn/startlist"
@@ -16,6 +17,7 @@ type Beacon struct {
 }
 
 func main() {
+	config.Load()
 	ddb.Download()
 	startlist.Init()
 	aprs.Listen(process_message)

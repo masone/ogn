@@ -4,9 +4,23 @@ import (
 	"fmt"
 	"github.com/kellydunn/golang-geo"
 	"github.com/masone/ogn/startlist_db"
+	"os"
+	"strconv"
+)
+
+var (
+	home_point          *geo.Point
+	home_elevation      float64
+	elevation_threshold float64 = 20 // in meters
+	distance_threshold  float64 = 2  // in kilometers
 )
 
 func Init() {
+	home_lat, _ := strconv.ParseFloat(os.Getenv("AF_LAT"), 64)
+	home_lng, _ := strconv.ParseFloat(os.Getenv("AF_LNG"), 64)
+	home_point = geo.NewPoint(home_lat, home_lng)
+	home_elevation, _ = strconv.ParseFloat(os.Getenv("AF_ELEVATION"), 64)
+
 	startlist_db.Init()
 }
 
@@ -43,11 +57,9 @@ func handleAirborne(id string, cs string) {
 }
 
 func near_coordinates(lat float64, lng float64) bool {
-	home := geo.NewPoint(47.5147283, 8.7722307)
 	plane := geo.NewPoint(lat, lng)
-	var threshold float64 = 1 // in kilometers
 
-	if home.GreatCircleDistance(plane) <= threshold {
+	if home_point.GreatCircleDistance(plane) <= distance_threshold {
 		return true
 	} else {
 		return false
@@ -55,10 +67,7 @@ func near_coordinates(lat float64, lng float64) bool {
 }
 
 func near_altitude(a float64) bool {
-	var home float64 = 470
-	var threshold float64 = 20
-
-	if a > home-threshold && a < home+threshold {
+	if a > home_elevation-elevation_threshold && a < home_elevation+elevation_threshold {
 		return true
 	} else {
 		return false

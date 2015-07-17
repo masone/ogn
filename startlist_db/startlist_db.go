@@ -9,26 +9,23 @@ import (
 	"time"
 )
 
-var (
-	Host     string = os.Getenv("INFLUX_HOST")
-	Port     string = os.Getenv("INFLUX_PORT")
-	DB       string = os.Getenv("INFLUX_DATABASE")
-	Username string = os.Getenv("INFLUX_USERNAME")
-	Password string = os.Getenv("INFLUX_PASSWORD")
-)
-
 var connection *influxdb.Client
 
 func Init() {
-	u, err := url.Parse(fmt.Sprintf("http://%s:%s", Host, Port))
+	u, err := url.Parse(
+		fmt.Sprintf("http://%s:%s",
+			os.Getenv("INFLUX_HOST"),
+			os.Getenv("INFLUX_PORT"),
+		))
+
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	conf := influxdb.Config{
 		URL:      *u,
-		Username: Username,
-		Password: Password,
+		Username: os.Getenv("INFLUX_USERNAME"),
+		Password: os.Getenv("INFLUX_PASSWORD"),
 	}
 
 	connection, err = influxdb.NewClient(conf)
@@ -92,7 +89,7 @@ func GetLastPosition(id string) (p string) {
 
 	q := influxdb.Query{
 		Command:  cmd,
-		Database: DB,
+		Database: os.Getenv("INFLUX_DATABASE"),
 	}
 
 	if response, err := connection.Query(q); err == nil {
@@ -114,7 +111,7 @@ func insertPoint(p influxdb.Point) {
 	pts := []influxdb.Point{p}
 	bps := influxdb.BatchPoints{
 		Points:          pts,
-		Database:        DB,
+		Database:        os.Getenv("INFLUX_DATABASE"),
 		RetentionPolicy: "default",
 	}
 	_, err := connection.Write(bps)

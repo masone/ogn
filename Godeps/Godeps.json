@@ -66,6 +66,11 @@
 			"Rev": "e63c59abddf340e6b9456f20b86c244b247ac279"
 		},
 		{
+			"ImportPath": "github.com/joho/godotenv",
+			"Comment": "v1-8-g443e926",
+			"Rev": "443e926da0d793d3b3f32118b1e4ba52ada26503"
+		},
+		{
 			"ImportPath": "github.com/kellydunn/golang-geo",
 			"Comment": "v0.6.0",
 			"Rev": "1977e227c0672ec036325eb33db1c4a2f365d069"
