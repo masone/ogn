@@ -3,3 +3,4 @@
 *.so
 /tmp
 ogn
+.env
