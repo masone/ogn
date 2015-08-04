@@ -10,6 +10,11 @@ Automated detection of starts and landings on a defined airfield by processing t
 go build && ./ogn
 ```
 
+You can also read APRS data from a logfile
+ ```
+ go build && ./ogn aprs.log
+ ```
+
 ## Deploy to Heroku
 
 Create a new app and install the buildkits plugin

@@ -14,11 +14,15 @@ import (
 
 func Listen(processor func(packet *fap.Packet)) {
 	defer fap.Cleanup()
+	var reader *bufio.Reader
 
-	connection := connect()
-	authenticate(connection)
-	keepalive(connection)
-	each_message(connection, processor)
+	if len(os.Args) > 1 {
+		reader = file_reader(os.Args[1])
+	} else {
+		reader = aprs_reader()
+	}
+
+	each_message(reader, processor)
 }
 
 func connect() net.Conn {
@@ -50,10 +54,9 @@ func keepalive(c net.Conn) {
 	}()
 }
 
-func each_message(c net.Conn, processor func(packet *fap.Packet)) {
-	reader := bufio.NewReader(c)
+func each_message(r *bufio.Reader, processor func(packet *fap.Packet)) {
 	for {
-		line, err := reader.ReadString('\n')
+		line, err := r.ReadString('\n')
 		if err == io.EOF {
 			log.Fatal(err)
 		} else if err != nil {
@@ -69,4 +72,23 @@ func each_message(c net.Conn, processor func(packet *fap.Packet)) {
 			}
 		}
 	}
+}
+
+func aprs_reader() *bufio.Reader {
+	connection := connect()
+	authenticate(connection)
+	keepalive(connection)
+
+	return bufio.NewReader(connection)
+}
+
+func file_reader(fn string) *bufio.Reader {
+	fmt.Printf("Reading from %s\n", fn)
+
+	f, err := os.Open(fn)
+	if err != nil {
+		panic(err)
+	}
+
+	return bufio.NewReader(f)
 }
