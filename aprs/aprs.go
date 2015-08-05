@@ -69,6 +69,9 @@ func each_message(r *bufio.Reader, processor func(packet *fap.Packet)) {
 			packet, err := fap.ParseAprs(line, false)
 			if err == nil {
 				processor(packet)
+			} else {
+			    log.Println(line)
+				log.Fatal(err)
 			}
 		}
 	}

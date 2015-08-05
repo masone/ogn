@@ -24,7 +24,12 @@ func Init() {
 	startlist_db.Init()
 }
 
-func ProcessEntry(id string, cs string, lat float64, lon float64, alt float64) {
+func ProcessEntry(id string, cs string, lat float64, lon float64, alt float64, climb_rate float64) {
+	if climb_rate != 0.0 {
+		startlist_db.InsertClimbRate(id, cs, climb_rate)
+	}
+	startlist_db.InsertAltitude(id, cs, alt)
+
 	if near_coordinates(lat, lon) && near_altitude(alt) {
 		handleOnGround(id, cs)
 	} else {
@@ -37,10 +42,10 @@ func handleOnGround(id string, cs string) {
 	startlist_db.InsertPosition(id, cs, "gnd")
 
 	if lastPosition == "air" {
-		fmt.Printf("%s **** just landed\n", cs)
+		fmt.Printf("*** %s landed %s\n", cs, id)
 		startlist_db.InsertLanding(id, cs)
 	} else {
-		fmt.Printf("%s still on ground\n", cs)
+		//fmt.Printf("%s still on ground %s\n", cs, id)
 	}
 }
 
@@ -49,11 +54,23 @@ func handleAirborne(id string, cs string) {
 	startlist_db.InsertPosition(id, cs, "air")
 
 	if lastPosition == "gnd" {
-		fmt.Printf("%s **** just started\n", cs)
-		startlist_db.InsertStart(id, cs)
+		launch_type := detectLaunchType(id)
+
+		fmt.Printf("*** %s started (%s), %s\n", cs, launch_type, id)
+		startlist_db.InsertStart(id, cs, launch_type)
 	} else {
-		fmt.Printf("%s still airborne %s\n", cs, id)
+		//fmt.Printf("%s still airborne %s\n", cs, id)
 	}
+}
+
+func detectLaunchType(id string) string {
+	climb := startlist_db.GetAverageClimb(id)
+	if climb > 500 {
+		return "W"
+	} else {
+		return "A"
+	}
+	// else if no towplane in sight
 }
 
 func near_coordinates(lat float64, lng float64) bool {

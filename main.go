@@ -31,8 +31,8 @@ func process_message(p *fap.Packet) {
 
 	if ok {
 		b = Beacon{Packet: p, Comment: c, Aircraft: a}
-		if b.Comment.Id != "" && a.Callsign != "" {
-			startlist.ProcessEntry(b.Comment.Id, b.Aircraft.Callsign, b.Packet.Latitude, b.Packet.Longitude, b.Packet.Altitude)
+		if b.Comment.Id != "" {
+			startlist.ProcessEntry(b.Comment.Id, b.Aircraft.Callsign, b.Packet.Latitude, b.Packet.Longitude, b.Packet.Altitude, b.Comment.ClimbRate)
 		}
 	} else {
 		b = Beacon{Packet: p, Comment: c}

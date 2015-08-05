@@ -1,6 +1,7 @@
 package startlist_db
 
 import (
+	"encoding/json"
 	"fmt"
 	influxdb "github.com/influxdb/influxdb/client"
 	"log"
@@ -49,14 +50,15 @@ func InsertLanding(id string, cs string) {
 	insertPoint(point)
 }
 
-func InsertStart(id string, cs string) {
+func InsertStart(id string, cs string, launch_type string) {
 	point := influxdb.Point{
 		Measurement: "starts",
 		Tags: map[string]string{
 			"id": id, // indexed
 		},
 		Fields: map[string]interface{}{
-			"cs": cs, // not indexed
+			"cs":          cs, // not indexed
+			"launch_type": launch_type,
 		},
 		Time: time.Now(),
 	}
@@ -77,12 +79,45 @@ func InsertPosition(id string, cs string, p string) {
 		},
 		Time: time.Now(),
 	}
+
+	insertPoint(point)
+}
+
+func InsertClimbRate(id string, cs string, climb_rate float64) {
+	point := influxdb.Point{
+		Measurement: "climb_rates",
+		Tags: map[string]string{
+			"id": id, // indexed
+		},
+		Fields: map[string]interface{}{
+			"cs":   cs, // not indexed
+			"rate": climb_rate,
+		},
+		Time: time.Now(),
+	}
+
+	insertPoint(point)
+}
+
+func InsertAltitude(id string, cs string, alt float64) {
+	point := influxdb.Point{
+		Measurement: "altitudes",
+		Tags: map[string]string{
+			"id": id, // indexed
+		},
+		Fields: map[string]interface{}{
+			"cs":  cs, // not indexed
+			"alt": alt,
+		},
+		Time: time.Now(),
+	}
+
 	insertPoint(point)
 }
 
 func GetLastPosition(id string) (p string) {
 	cmd := fmt.Sprintf(
-		"SELECT LAST(pos) FROM %s WHERE id='%s' time > now() - 5m LIMIT 1",
+		"SELECT LAST(pos) FROM %s WHERE id='%s' AND time > now() - 5m LIMIT 1",
 		"positions",
 		id,
 	)
@@ -99,12 +134,51 @@ func GetLastPosition(id string) (p string) {
 			res := response.Results
 
 			series := res[0].Series
-			if len(series) != 0 {
+
+			if len(series) != 0 && series[0].Values[0][1] != nil {
 				return series[0].Values[0][1].(string)
 			}
 		}
 	}
 	return
+}
+
+type ClimbResponse struct {
+	Id    string `json:"id"`
+	Title string `json:"title"`
+}
+
+func GetAverageClimb(id string) (c float64) {
+	cmd := fmt.Sprintf(
+		"SELECT DERIVATIVE(alt) FROM %s WHERE id='%s' AND time > now() - 30s",
+		"altitudes",
+		id,
+	)
+
+	q := influxdb.Query{
+		Command:  cmd,
+		Database: os.Getenv("INFLUX_DATABASE"),
+	}
+
+	if response, err := connection.Query(q); err == nil {
+		if response.Error() != nil {
+			log.Fatal(response.Error())
+		} else {
+			res := response.Results
+
+			series := res[0].Series
+
+			if len(series) != 0 {
+				val, err := series[0].Values[0][1].(json.Number).Float64()
+				if err != nil {
+					log.Fatal(err)
+				}
+
+				return val
+			}
+		}
+	}
+	return 0.0
 }
 
 func insertPoint(p influxdb.Point) {
