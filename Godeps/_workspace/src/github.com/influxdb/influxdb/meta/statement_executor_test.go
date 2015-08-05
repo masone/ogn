@@ -121,15 +121,18 @@ func TestStatementExecutor_ExecuteStatement_ShowServers(t *testing.T) {
 			{ID: 2, Host: "node1"},
 		}, nil
 	}
+	e.Store.PeersFn = func() ([]string, error) {
+		return []string{"node0"}, nil
+	}
 
 	if res := e.ExecuteStatement(influxql.MustParseStatement(`SHOW SERVERS`)); res.Err != nil {
 		t.Fatal(res.Err)
 	} else if !reflect.DeepEqual(res.Series, influxql.Rows{
 		{
-			Columns: []string{"id", "url"},
+			Columns: []string{"id", "url", "raft"},
 			Values: [][]interface{}{
-				{uint64(1), "http://node0"},
-				{uint64(2), "http://node1"},
+				{uint64(1), "http://node0", true},
+				{uint64(2), "http://node1", false},
 			},
 		},
 	}) {
@@ -312,6 +315,37 @@ func TestStatementExecutor_ExecuteStatement_Grant_Err(t *testing.T) {
 	}
 }
 
+// Ensure a GRANT statement for admin privilege can be executed.
+func TestStatementExecutor_ExecuteStatement_GrantAdmin(t *testing.T) {
+	e := NewStatementExecutor()
+	e.Store.SetAdminPrivilegeFn = func(username string, admin bool) error {
+		if username != "susy" {
+			t.Fatalf("unexpected username: %s", username)
+		} else if admin != true {
+			t.Fatalf("unexpected admin privilege: %t", admin)
+		}
+		return nil
+	}
+
+	if res := e.ExecuteStatement(influxql.MustParseStatement(`GRANT ALL TO susy`)); res.Err != nil {
+		t.Fatal(res.Err)
+	} else if res.Series != nil {
+		t.Fatalf("unexpected rows: %#v", res.Series)
+	}
+}
+
+// Ensure a GRANT statement for admin privilege returns errors from the store.
+func TestStatementExecutor_ExecuteStatement_GrantAdmin_Err(t *testing.T) {
+	e := NewStatementExecutor()
+	e.Store.SetAdminPrivilegeFn = func(username string, admin bool) error {
+		return errors.New("marker")
+	}
+
+	if res := e.ExecuteStatement(influxql.MustParseStatement(`GRANT ALL PRIVILEGES TO susy`)); res.Err == nil || res.Err.Error() != "marker" {
+		t.Fatalf("unexpected error: %s", res.Err)
+	}
+}
+
 // Ensure a REVOKE statement can be executed.
 func TestStatementExecutor_ExecuteStatement_Revoke(t *testing.T) {
 	e := NewStatementExecutor()
@@ -341,6 +375,37 @@ func TestStatementExecutor_ExecuteStatement_Revoke_Err(t *testing.T) {
 	}
 
 	if res := e.ExecuteStatement(influxql.MustParseStatement(`REVOKE ALL PRIVILEGES ON foo FROM susy`)); res.Err == nil || res.Err.Error() != "marker" {
+		t.Fatalf("unexpected error: %s", res.Err)
+	}
+}
+
+// Ensure a REVOKE statement for admin privilege can be executed.
+func TestStatementExecutor_ExecuteStatement_RevokeAdmin(t *testing.T) {
+	e := NewStatementExecutor()
+	e.Store.SetAdminPrivilegeFn = func(username string, admin bool) error {
+		if username != "susy" {
+			t.Fatalf("unexpected username: %s", username)
+		} else if admin != false {
+			t.Fatalf("unexpected admin privilege: %t", admin)
+		}
+		return nil
+	}
+
+	if res := e.ExecuteStatement(influxql.MustParseStatement(`REVOKE ALL PRIVILEGES FROM susy`)); res.Err != nil {
+		t.Fatal(res.Err)
+	} else if res.Series != nil {
+		t.Fatalf("unexpected rows: %#v", res.Series)
+	}
+}
+
+// Ensure a REVOKE statement for admin privilege returns errors from the store.
+func TestStatementExecutor_ExecuteStatement_RevokeAdmin_Err(t *testing.T) {
+	e := NewStatementExecutor()
+	e.Store.SetAdminPrivilegeFn = func(username string, admin bool) error {
+		return errors.New("marker")
+	}
+
+	if res := e.ExecuteStatement(influxql.MustParseStatement(`REVOKE ALL PRIVILEGES FROM susy`)); res.Err == nil || res.Err.Error() != "marker" {
 		t.Fatalf("unexpected error: %s", res.Err)
 	}
 }
@@ -513,7 +578,7 @@ func TestStatementExecutor_ExecuteStatement_ShowRetentionPolicies(t *testing.T) 
 		}, nil
 	}
 
-	if res := e.ExecuteStatement(influxql.MustParseStatement(`SHOW RETENTION POLICIES db0`)); res.Err != nil {
+	if res := e.ExecuteStatement(influxql.MustParseStatement(`SHOW RETENTION POLICIES ON db0`)); res.Err != nil {
 		t.Fatal(res.Err)
 	} else if !reflect.DeepEqual(res.Series, influxql.Rows{
 		{
@@ -535,7 +600,7 @@ func TestStatementExecutor_ExecuteStatement_ShowRetentionPolicies_Err(t *testing
 		return nil, errors.New("marker")
 	}
 
-	if res := e.ExecuteStatement(influxql.MustParseStatement(`SHOW RETENTION POLICIES db0`)); res.Err == nil || res.Err.Error() != "marker" {
+	if res := e.ExecuteStatement(influxql.MustParseStatement(`SHOW RETENTION POLICIES ON db0`)); res.Err == nil || res.Err.Error() != "marker" {
 		t.Fatalf("unexpected error: %s", res.Err)
 	}
 }
@@ -547,7 +612,7 @@ func TestStatementExecutor_ExecuteStatement_ShowRetentionPolicies_ErrDatabaseNot
 		return nil, nil
 	}
 
-	if res := e.ExecuteStatement(influxql.MustParseStatement(`SHOW RETENTION POLICIES db0`)); res.Err != meta.ErrDatabaseNotFound {
+	if res := e.ExecuteStatement(influxql.MustParseStatement(`SHOW RETENTION POLICIES ON db0`)); res.Err != meta.ErrDatabaseNotFound {
 		t.Fatalf("unexpected error: %s", res.Err)
 	}
 }
@@ -716,6 +781,7 @@ func NewStatementExecutor() *StatementExecutor {
 // StatementExecutorStore represents a mock implementation of StatementExecutor.Store.
 type StatementExecutorStore struct {
 	NodesFn                     func() ([]meta.NodeInfo, error)
+	PeersFn                     func() ([]string, error)
 	DatabaseFn                  func(name string) (*meta.DatabaseInfo, error)
 	DatabasesFn                 func() ([]meta.DatabaseInfo, error)
 	CreateDatabaseFn            func(name string) (*meta.DatabaseInfo, error)
@@ -730,7 +796,9 @@ type StatementExecutorStore struct {
 	UpdateUserFn                func(name, password string) error
 	DropUserFn                  func(name string) error
 	SetPrivilegeFn              func(username, database string, p influxql.Privilege) error
+	SetAdminPrivilegeFn         func(username string, admin bool) error
 	UserPrivilegesFn            func(username string) (map[string]influxql.Privilege, error)
+	UserPrivilegeFn             func(username, database string) (*influxql.Privilege, error)
 	ContinuousQueriesFn         func() ([]meta.ContinuousQueryInfo, error)
 	CreateContinuousQueryFn     func(database, name, query string) error
 	DropContinuousQueryFn       func(database, name string) error
@@ -738,6 +806,10 @@ type StatementExecutorStore struct {
 
 func (s *StatementExecutorStore) Nodes() ([]meta.NodeInfo, error) {
 	return s.NodesFn()
+}
+
+func (s *StatementExecutorStore) Peers() ([]string, error) {
+	return s.PeersFn()
 }
 
 func (s *StatementExecutorStore) Database(name string) (*meta.DatabaseInfo, error) {
@@ -796,8 +868,16 @@ func (s *StatementExecutorStore) SetPrivilege(username, database string, p influ
 	return s.SetPrivilegeFn(username, database, p)
 }
 
+func (s *StatementExecutorStore) SetAdminPrivilege(username string, admin bool) error {
+	return s.SetAdminPrivilegeFn(username, admin)
+}
+
 func (s *StatementExecutorStore) UserPrivileges(username string) (map[string]influxql.Privilege, error) {
 	return s.UserPrivilegesFn(username)
+}
+
+func (s *StatementExecutorStore) UserPrivilege(username, database string) (*influxql.Privilege, error) {
+	return s.UserPrivilegeFn(username, database)
 }
 
 func (s *StatementExecutorStore) ContinuousQueries() ([]meta.ContinuousQueryInfo, error) {

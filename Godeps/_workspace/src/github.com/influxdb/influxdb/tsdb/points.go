@@ -266,6 +266,10 @@ func scanKey(buf []byte, i int) (int, []byte, error) {
 
 		// reached end of the block? (next block would be fields)
 		if buf[i] == ' ' {
+			// check for "cpu,tag value=1"
+			if equals == 0 && commas > 0 {
+				return i, buf[start:i], fmt.Errorf("missing tag value")
+			}
 			if equals > 0 && commas-1 != equals-1 {
 				return i, buf[start:i], fmt.Errorf("missing tag value")
 			}
@@ -280,6 +284,12 @@ func scanKey(buf []byte, i int) (int, []byte, error) {
 	// We're using commas -1 because there should always be a comma after measurement
 	if equals > 0 && commas-1 != equals-1 {
 		return i, buf[start:i], fmt.Errorf("invalid tag format")
+	}
+
+	// This check makes sure we actually received fields from the user. #3379
+	// This will catch invalid syntax such as: `cpu,host=serverA,region=us-west`
+	if i >= len(buf) {
+		return i, buf[start:i], fmt.Errorf("missing fields")
 	}
 
 	// Now we know where the key region is within buf, and the locations of tags, we
@@ -402,23 +412,22 @@ func scanFields(buf []byte, i int) (int, []byte, error) {
 				return i, buf[start:i], fmt.Errorf("missing field value")
 			}
 
-			if isNumeric(buf[i+1]) || buf[i+1] == '-' {
+			if isNumeric(buf[i+1]) || buf[i+1] == '-' || buf[i+1] == 'N' || buf[i+1] == 'n' {
 				var err error
-				i, _, err = scanNumber(buf, i+1)
+				i, err = scanNumber(buf, i+1)
 				if err != nil {
 					return i, buf[start:i], err
-				} else {
-					continue
 				}
-				// If next byte is not a double-quote, the value must be a boolean
-			} else if buf[i+1] != '"' {
+				continue
+			}
+			// If next byte is not a double-quote, the value must be a boolean
+			if buf[i+1] != '"' {
 				var err error
 				i, _, err = scanBoolean(buf, i+1)
 				if err != nil {
 					return i, buf[start:i], err
-				} else {
-					continue
 				}
+				continue
 			}
 		}
 
@@ -479,8 +488,9 @@ func isNumeric(b byte) bool {
 // scanNumber returns the end position within buf, start at i after
 // scanning over buf for an integer, or float.  It returns an
 // error if a invalid number is scanned.
-func scanNumber(buf []byte, i int) (int, []byte, error) {
+func scanNumber(buf []byte, i int) (int, error) {
 	start := i
+	var isInt bool
 
 	// Is negative number?
 	if i < len(buf) && buf[i] == '-' {
@@ -502,13 +512,19 @@ func scanNumber(buf []byte, i int) (int, []byte, error) {
 			break
 		}
 
+		if buf[i] == 'i' && i > start && !isInt {
+			isInt = true
+			i += 1
+			continue
+		}
+
 		if buf[i] == '.' {
 			decimals += 1
 		}
 
 		// Can't have more than 1 decimal (e.g. 1.1.1 should fail)
 		if decimals > 1 {
-			return i, buf[start:i], fmt.Errorf("invalid number")
+			return i, fmt.Errorf("invalid number")
 		}
 
 		// `e` is valid for floats but not as the first char
@@ -524,33 +540,46 @@ func scanNumber(buf []byte, i int) (int, []byte, error) {
 			continue
 		}
 
+		// NaN is a valid float
+		if i+3 < len(buf) && (buf[i] == 'N' || buf[i] == 'n') {
+			if (buf[i+1] == 'a' || buf[i+1] == 'A') && (buf[i+2] == 'N' || buf[i+2] == 'n') {
+				i += 3
+				continue
+			}
+			return i, fmt.Errorf("invalid number")
+		}
+
 		if !isNumeric(buf[i]) {
-			return i, buf[start:i], fmt.Errorf("invalid number")
+			return i, fmt.Errorf("invalid number")
 		}
 		i += 1
+	}
+	if isInt && decimals > 0 {
+		return i, fmt.Errorf("invalid number")
 	}
 
 	// It's more common that numbers will be within min/max range for their type but we need to prevent
 	// out or range numbers from being parsed successfully.  This uses some simple heuristics to decide
 	// if we should parse the number to the actual type.  It does not do it all the time because it incurs
 	// extra allocations and we end up converting the type again when writing points to disk.
-	if decimals == 0 {
+	if isInt {
 		// Parse the int to check bounds the number of digits could be larger than the max range
-		if len(buf[start:i]) >= maxInt64Digits || len(buf[start:i]) >= minInt64Digits {
-			if _, err := strconv.ParseInt(string(buf[start:i]), 10, 64); err != nil {
-				return i, buf[start:i], fmt.Errorf("invalid integer")
+		// We subtract 1 from the index to remove the `i` from our tests
+		if len(buf[start:i-1]) >= maxInt64Digits || len(buf[start:i-1]) >= minInt64Digits {
+			if _, err := strconv.ParseInt(string(buf[start:i-1]), 10, 64); err != nil {
+				return i, fmt.Errorf("unable to parse integer %s: %s", buf[start:i-1], err)
 			}
 		}
 	} else {
 		// Parse the float to check bounds if it's scientific or the number of digits could be larger than the max range
 		if scientific || len(buf[start:i]) >= maxFloat64Digits || len(buf[start:i]) >= minFloat64Digits {
 			if _, err := strconv.ParseFloat(string(buf[start:i]), 10); err != nil {
-				return i, buf[start:i], fmt.Errorf("invalid float")
+				return i, fmt.Errorf("invalid float")
 			}
 		}
 	}
 
-	return i, buf[start:i], nil
+	return i, nil
 }
 
 // scanBoolean returns the end position within buf, start at i after
@@ -599,9 +628,9 @@ func scanBoolean(buf []byte, i int) (int, []byte, error) {
 	case 'f':
 		valid = bytes.Equal(buf[start:i], []byte("false"))
 	case 'T':
-		valid = bytes.Equal(buf[start:i], []byte("TRUE"))
+		valid = bytes.Equal(buf[start:i], []byte("TRUE")) || bytes.Equal(buf[start:i], []byte("True"))
 	case 'F':
-		valid = bytes.Equal(buf[start:i], []byte("FALSE"))
+		valid = bytes.Equal(buf[start:i], []byte("FALSE")) || bytes.Equal(buf[start:i], []byte("False"))
 	}
 
 	if !valid {
@@ -631,13 +660,18 @@ func skipWhitespace(buf []byte, i int) int {
 
 // scanTo returns the end position in buf and the next consecutive block
 // of bytes, starting from i and ending with stop byte.  If there are leading
-// spaces, they are skipped.
+// spaces or escaped chars, they are skipped.
 func scanTo(buf []byte, i int, stop byte) (int, []byte) {
 	start := i
 	for {
 		// reached the end of buf?
 		if i >= len(buf) {
 			break
+		}
+
+		if buf[i] == '\\' {
+			i += 2
+			continue
 		}
 
 		// reached end of block?
@@ -661,6 +695,10 @@ func scanToSpaceOr(buf []byte, i int, stop byte) (int, []byte) {
 			break
 		}
 
+		if buf[i] == '\\' {
+			i += 2
+			continue
+		}
 		// reached end of block?
 		if buf[i] == stop || buf[i] == ' ' {
 			break
@@ -762,7 +800,7 @@ func unescapeQuoteString(in string) string {
 	return strings.Replace(in, `\"`, `"`, -1)
 }
 
-// NewPoint returns a new point with the given measurement name, tags, fiels and timestamp
+// NewPoint returns a new point with the given measurement name, tags, fields and timestamp
 func NewPoint(name string, tags Tags, fields Fields, time time.Time) Point {
 	return &point{
 		key:    makeKey([]byte(name), tags),
@@ -798,7 +836,7 @@ func (p *point) SetName(name string) {
 	p.key = makeKey([]byte(name), p.Tags())
 }
 
-// Time return the timesteamp for the point
+// Time return the timestamp for the point
 func (p *point) Time() time.Time {
 	return p.time
 }
@@ -838,7 +876,7 @@ func (p *point) Tags() Tags {
 }
 
 func makeKey(name []byte, tags Tags) []byte {
-	return append(escape(name), tags.hashKey()...)
+	return append(escape(name), tags.HashKey()...)
 }
 
 // SetTags replaces the tags for the point
@@ -853,7 +891,7 @@ func (p *point) AddTag(key, value string) {
 	p.key = makeKey(p.name(), tags)
 }
 
-// Fields returns the fiels for the point
+// Fields returns the fields for the point
 func (p *point) Fields() Fields {
 	return p.unmarshalBinary()
 }
@@ -924,7 +962,7 @@ func (p *point) UnixNano() int64 {
 
 type Tags map[string]string
 
-func (t Tags) hashKey() []byte {
+func (t Tags) HashKey() []byte {
 	// Empty maps marshal to empty bytes.
 	if len(t) == 0 {
 		return nil
@@ -969,15 +1007,20 @@ func (t Tags) hashKey() []byte {
 type Fields map[string]interface{}
 
 func parseNumber(val []byte) (interface{}, error) {
+	if val[len(val)-1] == 'i' {
+		val = val[:len(val)-1]
+		return strconv.ParseInt(string(val), 10, 64)
+	}
 	for i := 0; i < len(val); i++ {
-		if val[i] == '.' {
+		// If there is a decimal or an N (NaN), I (Inf), parse as float
+		if val[i] == '.' || val[i] == 'N' || val[i] == 'n' || val[i] == 'I' || val[i] == 'i' || val[i] == 'e' {
 			return strconv.ParseFloat(string(val), 64)
 		}
 		if val[i] < '0' && val[i] > '9' {
 			return string(val), nil
 		}
 	}
-	return strconv.ParseInt(string(val), 10, 64)
+	return strconv.ParseFloat(string(val), 64)
 }
 
 func newFieldsFromBinary(buf []byte) Fields {
@@ -997,6 +1040,7 @@ func newFieldsFromBinary(buf []byte) Fields {
 		if len(name) == 0 {
 			continue
 		}
+		name = unescape(name)
 
 		i, valueBuf = scanFieldValue(buf, i+1)
 		if len(valueBuf) == 0 {
@@ -1007,8 +1051,11 @@ func newFieldsFromBinary(buf []byte) Fields {
 		// If the first char is a double-quote, then unmarshal as string
 		if valueBuf[0] == '"' {
 			value = unescapeQuoteString(string(valueBuf[1 : len(valueBuf)-1]))
-			// Check for numeric characters
-		} else if (valueBuf[0] >= '0' && valueBuf[0] <= '9') || valueBuf[0] == '-' || valueBuf[0] == '.' {
+			// Check for numeric characters and special NaN or Inf
+		} else if (valueBuf[0] >= '0' && valueBuf[0] <= '9') || valueBuf[0] == '-' || valueBuf[0] == '+' || valueBuf[0] == '.' ||
+			valueBuf[0] == 'N' || valueBuf[0] == 'n' || // NaN
+			valueBuf[0] == 'I' || valueBuf[0] == 'i' { // Inf
+
 			value, err = parseNumber(valueBuf)
 			if err != nil {
 				panic(fmt.Sprintf("unable to parse number value '%v': %v", string(valueBuf), err))
@@ -1021,7 +1068,7 @@ func newFieldsFromBinary(buf []byte) Fields {
 				panic(fmt.Sprintf("unable to parse bool value '%v': %v\n", string(valueBuf), err))
 			}
 		}
-		fields[string(unescape(name))] = value
+		fields[string(name)] = value
 		i += 1
 	}
 	return fields
@@ -1044,12 +1091,16 @@ func (p Fields) MarshalBinary() []byte {
 		switch t := v.(type) {
 		case int:
 			b = append(b, []byte(strconv.FormatInt(int64(t), 10))...)
+			b = append(b, 'i')
 		case int32:
 			b = append(b, []byte(strconv.FormatInt(int64(t), 10))...)
+			b = append(b, 'i')
 		case uint64:
 			b = append(b, []byte(strconv.FormatUint(t, 10))...)
+			b = append(b, 'i')
 		case int64:
 			b = append(b, []byte(strconv.FormatInt(t, 10))...)
+			b = append(b, 'i')
 		case float64:
 			// ensure there is a decimal in the encoded for
 
@@ -1071,7 +1122,11 @@ func (p Fields) MarshalBinary() []byte {
 		case nil:
 			// skip
 		default:
-			panic(fmt.Sprintf("unknown type: %T", v))
+			// Can't determine the type, so convert to string
+			b = append(b, '"')
+			b = append(b, []byte(escapeQuoteString(fmt.Sprintf("%v", v)))...)
+			b = append(b, '"')
+
 		}
 		b = append(b, ',')
 	}

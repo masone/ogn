@@ -1,6 +1,9 @@
 package meta
 
 import (
+	"bytes"
+	crand "crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -18,7 +21,6 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
 	"github.com/influxdb/influxdb/influxql"
 	"github.com/influxdb/influxdb/meta/internal"
 	"golang.org/x/crypto/bcrypt"
@@ -28,6 +30,10 @@ import (
 const (
 	MuxRaftHeader = 0
 	MuxExecHeader = 1
+	MuxRPCHeader  = 5
+
+	// SaltBytes is the number of bytes used for salts
+	SaltBytes = 32
 )
 
 // ExecMagic is the first 4 bytes sent to a remote exec connection to verify
@@ -47,6 +53,7 @@ const (
 	raftSnapshotsRetained = 2
 	raftTransportMaxPool  = 3
 	raftTransportTimeout  = 10 * time.Second
+	MaxRaftNodes          = 3
 )
 
 // Store represents a raft-backed metastore.
@@ -62,23 +69,30 @@ type Store struct {
 
 	data *Data
 
+	rpc *rpc
+
 	remoteAddr net.Addr
-	raft       *raft.Raft
-	raftLayer  *raftLayer
-	peerStore  raft.PeerStore
-	transport  *raft.NetworkTransport
-	store      *raftboltdb.BoltStore
+
+	raftState raftState
 
 	ready   chan struct{}
 	err     chan error
 	closing chan struct{}
 	wg      sync.WaitGroup
+	changed chan struct{}
+
+	// clusterTracingEnabled controls whether low-level cluster communcation is logged.
+	// Useful for troubleshooting
+	clusterTracingEnabled bool
 
 	retentionAutoCreate bool
 
 	// The listeners to accept raft and remote exec connections from.
 	RaftListener net.Listener
 	ExecListener net.Listener
+
+	// The listener for higher-level, cluster operations
+	RPCListener net.Listener
 
 	// The advertised hostname of the store.
 	Addr net.Addr
@@ -96,12 +110,24 @@ type Store struct {
 	// The amount of time without an apply before sending a heartbeat.
 	CommitTimeout time.Duration
 
+	// Authentication cache.
+	authCache map[string]authUser
+
+	// hashPassword generates a cryptographically secure hash for password.
+	// Returns an error if the password is invalid or a hash cannot be generated.
+	hashPassword HashPasswordFn
+
 	Logger *log.Logger
 }
 
+type authUser struct {
+	salt []byte
+	hash []byte
+}
+
 // NewStore returns a new instance of Store.
-func NewStore(c Config) *Store {
-	return &Store{
+func NewStore(c *Config) *Store {
+	s := &Store{
 		path:  c.Dir,
 		peers: c.Peers,
 		data:  &Data{},
@@ -109,15 +135,29 @@ func NewStore(c Config) *Store {
 		ready:   make(chan struct{}),
 		err:     make(chan error),
 		closing: make(chan struct{}),
+		changed: make(chan struct{}),
 
-		retentionAutoCreate: c.RetentionAutoCreate,
+		clusterTracingEnabled: c.ClusterTracing,
+		retentionAutoCreate:   c.RetentionAutoCreate,
 
 		HeartbeatTimeout:   time.Duration(c.HeartbeatTimeout),
 		ElectionTimeout:    time.Duration(c.ElectionTimeout),
 		LeaderLeaseTimeout: time.Duration(c.LeaderLeaseTimeout),
 		CommitTimeout:      time.Duration(c.CommitTimeout),
-		Logger:             log.New(os.Stderr, "", log.LstdFlags),
+		authCache:          make(map[string]authUser, 0),
+		hashPassword: func(password string) ([]byte, error) {
+			return bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
+		},
+		Logger: log.New(os.Stderr, "[metastore] ", log.LstdFlags),
 	}
+
+	s.raftState = &localRaft{store: s}
+	s.rpc = &rpc{
+		store:          s,
+		tracingEnabled: c.ClusterTracing,
+		logger:         s.Logger,
+	}
+	return s
 }
 
 // Path returns the root path when open.
@@ -131,7 +171,7 @@ func (s *Store) IDPath() string { return filepath.Join(s.path, "id") }
 func (s *Store) Open() error {
 	// Verify that no more than 3 peers.
 	// https://github.com/influxdb/influxdb/issues/2750
-	if len(s.peers) > 3 {
+	if len(s.peers) > MaxRaftNodes {
 		return ErrTooManyPeers
 	}
 
@@ -140,6 +180,8 @@ func (s *Store) Open() error {
 		panic("Store.RaftListener not set")
 	} else if s.ExecListener == nil {
 		panic("Store.ExecListener not set")
+	} else if s.RPCListener == nil {
+		panic("Store.RPCListener not set")
 	}
 
 	if err := func() error {
@@ -152,8 +194,13 @@ func (s *Store) Open() error {
 		}
 		s.opened = true
 
+		// load our raft state
+		if err := s.loadState(); err != nil {
+			return err
+		}
+
 		// Create the root directory if it doesn't already exist.
-		if err := os.MkdirAll(s.path, 0777); err != nil {
+		if err := s.createRootDir(); err != nil {
 			return fmt.Errorf("mkdir all: %s", err)
 		}
 
@@ -182,6 +229,14 @@ func (s *Store) Open() error {
 	s.wg.Add(1)
 	go s.serveExecListener()
 
+	s.wg.Add(1)
+	go s.serveRPCListener()
+
+	// Join an existing cluster if we needed
+	if err := s.joinCluster(); err != nil {
+		return fmt.Errorf("join: %v", err)
+	}
+
 	// If the ID doesn't exist then create a new node.
 	if s.id == 0 {
 		go s.init()
@@ -192,68 +247,130 @@ func (s *Store) Open() error {
 	return nil
 }
 
-// openRaft initializes the raft store.
-func (s *Store) openRaft() error {
-	// Setup raft configuration.
-	config := raft.DefaultConfig()
-	config.Logger = s.Logger
-	config.HeartbeatTimeout = s.HeartbeatTimeout
-	config.ElectionTimeout = s.ElectionTimeout
-	config.LeaderLeaseTimeout = s.LeaderLeaseTimeout
-	config.CommitTimeout = s.CommitTimeout
-
-	// If no peers are set in the config then start as a single server.
-	config.EnableSingleNode = (len(s.peers) == 0)
-
-	// Build raft layer to multiplex listener.
-	s.raftLayer = newRaftLayer(s.RaftListener, s.Addr)
-
-	// Create a transport layer
-	s.transport = raft.NewNetworkTransport(s.raftLayer, 3, 10*time.Second, os.Stderr)
-
-	// Create peer storage.
-	s.peerStore = raft.NewJSONPeers(s.path, s.transport)
-
-	// Create the log store and stable store.
-	store, err := raftboltdb.NewBoltStore(filepath.Join(s.path, "raft.db"))
+// loadState sets the appropriate raftState from our persistent storage
+func (s *Store) loadState() error {
+	peers, err := readPeersJSON(filepath.Join(s.path, "peers.json"))
 	if err != nil {
-		return fmt.Errorf("new bolt store: %s", err)
-	}
-	s.store = store
-
-	// Create the snapshot store.
-	snapshots, err := raft.NewFileSnapshotStore(s.path, raftSnapshotsRetained, os.Stderr)
-	if err != nil {
-		return fmt.Errorf("file snapshot store: %s", err)
+		return err
 	}
 
-	// Create raft log.
-	r, err := raft.NewRaft(config, (*storeFSM)(s), store, store, snapshots, s.peerStore, s.transport)
-	if err != nil {
-		return fmt.Errorf("new raft: %s", err)
+	// If we have existing peers, use those.  This will override what's in the
+	// config.
+	if len(peers) > 0 {
+		s.peers = peers
 	}
-	s.raft = r
+
+	// if no peers on disk, we need to start raft in order to initialize a new
+	// cluster or join an existing one.
+	if len(peers) == 0 {
+		s.raftState = &localRaft{store: s}
+		// if we have a raft database, (maybe restored), we should start raft locally
+	} else if _, err := os.Stat(filepath.Join(s.path, "raft.db")); err == nil {
+		s.raftState = &localRaft{store: s}
+		// otherwise, we should use remote raft
+	} else {
+		s.raftState = &remoteRaft{store: s}
+	}
+	return nil
+}
+
+func (s *Store) joinCluster() error {
+
+	// No join options, so nothing to do
+	if len(s.peers) == 0 {
+		return nil
+	}
+
+	// We already have a node ID so were already part of a cluster,
+	// don't join again so we can use our existing state.
+	if s.id != 0 {
+		s.Logger.Printf("skipping join: already member of cluster: nodeId=%v raftEnabled=%v raftNodes=%v",
+			s.id, raft.PeerContained(s.peers, s.Addr.String()), s.peers)
+		return nil
+	}
+
+	s.Logger.Printf("joining cluster at: %v", s.peers)
+	for {
+		for _, join := range s.peers {
+			res, err := s.rpc.join(s.Addr.String(), join)
+			if err != nil {
+				s.Logger.Printf("join failed: %v", err)
+				continue
+			}
+
+			s.Logger.Printf("joined remote node %v", join)
+			s.Logger.Printf("nodeId=%v raftEnabled=%v raftNodes=%v", res.NodeID, res.RaftEnabled, res.RaftNodes)
+
+			s.peers = res.RaftNodes
+			s.id = res.NodeID
+
+			if err := s.writeNodeID(res.NodeID); err != nil {
+				s.Logger.Printf("write node id failed: %v", err)
+				break
+			}
+
+			if !res.RaftEnabled {
+				// Shutdown our local raft and transition to a remote raft state
+				if err := s.enableRemoteRaft(); err != nil {
+					s.Logger.Printf("enable remote raft failed: %v", err)
+					break
+				}
+			}
+			return nil
+		}
+
+		s.Logger.Printf("join failed: retrying...")
+		time.Sleep(time.Second)
+	}
+}
+
+func (s *Store) enableLocalRaft() error {
+	if _, ok := s.raftState.(*localRaft); ok {
+		return nil
+	}
+	s.Logger.Printf("switching to local raft")
+
+	lr := &localRaft{store: s}
+	return s.changeState(lr)
+}
+
+func (s *Store) enableRemoteRaft() error {
+	if _, ok := s.raftState.(*remoteRaft); ok {
+		return nil
+	}
+
+	s.Logger.Printf("switching to remote raft")
+	rr := &remoteRaft{store: s}
+	return s.changeState(rr)
+}
+
+func (s *Store) changeState(state raftState) error {
+	if err := s.raftState.close(); err != nil {
+		return err
+	}
+
+	// Clear out any persistent state
+	if err := s.raftState.remove(); err != nil {
+		return err
+	}
+
+	s.raftState = state
+
+	if err := s.raftState.open(); err != nil {
+		return err
+	}
 
 	return nil
 }
 
+// openRaft initializes the raft store.
+func (s *Store) openRaft() error {
+	return s.raftState.open()
+}
+
 // initialize attempts to bootstrap the raft store if there are no committed entries.
 func (s *Store) initialize() error {
-	// If we have committed entries then the store is already in the cluster.
-	/*
-		if index, err := s.store.LastIndex(); err != nil {
-			return fmt.Errorf("last index: %s", err)
-		} else if index > 0 {
-			return nil
-		}
-	*/
-
-	// Force set peers.
-	if err := s.SetPeers(s.peers); err != nil {
-		return fmt.Errorf("set raft peers: %s", err)
-	}
-
-	return nil
+	return s.raftState.initialize()
 }
 
 // Close closes the store and shuts down the node in the cluster.
@@ -261,6 +378,23 @@ func (s *Store) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.close()
+}
+
+// WaitForDataChanged will block the current goroutine until the metastore index has
+// be updated.
+func (s *Store) WaitForDataChanged() error {
+	s.mu.RLock()
+	changed := s.changed
+	s.mu.RUnlock()
+
+	for {
+		select {
+		case <-s.closing:
+			return errors.New("closing")
+		case <-changed:
+			return nil
+		}
+	}
 }
 
 func (s *Store) close() error {
@@ -274,18 +408,9 @@ func (s *Store) close() error {
 	close(s.closing)
 	// FIXME(benbjohnson): s.wg.Wait()
 
-	// Shutdown raft.
-	if s.raft != nil {
-		s.raft.Shutdown()
-		s.raft = nil
-	}
-	if s.transport != nil {
-		s.transport.Close()
-		s.transport = nil
-	}
-	if s.store != nil {
-		s.store.Close()
-		s.store = nil
+	if s.raftState != nil {
+		s.raftState.close()
+		s.raftState = nil
 	}
 
 	return nil
@@ -330,7 +455,7 @@ func (s *Store) init() {
 // Writes the id of the node to file on success.
 func (s *Store) createLocalNode() error {
 	// Wait for leader.
-	if err := s.WaitForLeader(5 * time.Second); err != nil {
+	if err := s.WaitForLeader(0); err != nil {
 		return fmt.Errorf("wait for leader: %s", err)
 	}
 
@@ -341,7 +466,7 @@ func (s *Store) createLocalNode() error {
 	}
 
 	// Write node id to file.
-	if err := ioutil.WriteFile(s.IDPath(), []byte(strconv.FormatUint(ni.ID, 10)), 0666); err != nil {
+	if err := s.writeNodeID(ni.ID); err != nil {
 		return fmt.Errorf("write file: %s", err)
 	}
 
@@ -353,18 +478,25 @@ func (s *Store) createLocalNode() error {
 	return nil
 }
 
+func (s *Store) createRootDir() error {
+	return os.MkdirAll(s.path, 0777)
+}
+
+func (s *Store) writeNodeID(id uint64) error {
+	if err := s.createRootDir(); err != nil {
+		return err
+	}
+	return ioutil.WriteFile(s.IDPath(), []byte(strconv.FormatUint(id, 10)), 0666)
+}
+
 // Snapshot saves a snapshot of the current state.
 func (s *Store) Snapshot() error {
-	future := s.raft.Snapshot()
-	return future.Error()
+	return s.raftState.snapshot()
 }
 
 // WaitForLeader sleeps until a leader is found or a timeout occurs.
+// timeout == 0 means to wait forever.
 func (s *Store) WaitForLeader(timeout time.Duration) error {
-	if s.raft.Leader() != "" {
-		return nil
-	}
-
 	// Begin timeout timer.
 	timer := time.NewTimer(timeout)
 	defer timer.Stop()
@@ -377,9 +509,11 @@ func (s *Store) WaitForLeader(timeout time.Duration) error {
 		case <-s.closing:
 			return errors.New("closing")
 		case <-timer.C:
-			return errors.New("timeout")
+			if timeout != 0 {
+				return errors.New("timeout")
+			}
 		case <-ticker.C:
-			if s.raft.Leader() != "" {
+			if s.Leader() != "" {
 				return nil
 			}
 		}
@@ -396,10 +530,10 @@ func (s *Store) Err() <-chan error { return s.err }
 func (s *Store) IsLeader() bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.raft == nil {
+	if s.raftState == nil {
 		return false
 	}
-	return s.raft.State() == raft.Leader
+	return s.raftState.isLeader()
 }
 
 // Leader returns what the store thinks is the current leader. An empty
@@ -407,32 +541,27 @@ func (s *Store) IsLeader() bool {
 func (s *Store) Leader() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.raft == nil {
+	if s.raftState == nil {
 		return ""
 	}
-	return s.raft.Leader()
-}
-
-// LeaderCh returns a channel that notifies on leadership change.
-// Panics when the store has not been opened yet.
-func (s *Store) LeaderCh() <-chan bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	assert(s.raft != nil, "cannot retrieve leadership channel when closed")
-	return s.raft.LeaderCh()
+	return s.raftState.leader()
 }
 
 // SetPeers sets a list of peers in the cluster.
 func (s *Store) SetPeers(addrs []string) error {
-	a := make([]string, len(addrs))
-	for i, s := range addrs {
-		addr, err := net.ResolveTCPAddr("tcp", s)
-		if err != nil {
-			return fmt.Errorf("cannot resolve addr: %s, err=%s", s, err)
-		}
-		a[i] = addr.String()
-	}
-	return s.raft.SetPeers(a).Error()
+	return s.raftState.setPeers(addrs)
+}
+
+// AddPeer adds addr to the list of peers in the cluster.
+func (s *Store) AddPeer(addr string) error {
+	return s.raftState.addPeer(addr)
+}
+
+// Peers returns the list of peers in the cluster.
+func (s *Store) Peers() ([]string, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.raftState.peers()
 }
 
 // serveExecListener processes remote exec connections.
@@ -446,10 +575,9 @@ func (s *Store) serveExecListener() {
 		if err != nil {
 			if strings.Contains(err.Error(), "connection closed") {
 				return
-			} else {
-				s.Logger.Printf("temporary accept error: %s", err)
-				continue
 			}
+			s.Logger.Printf("temporary accept error: %s", err)
+			continue
 		}
 
 		// Handle connection in a separate goroutine.
@@ -461,6 +589,25 @@ func (s *Store) serveExecListener() {
 // handleExecConn reads a command from the connection and executes it.
 func (s *Store) handleExecConn(conn net.Conn) {
 	defer s.wg.Done()
+
+	// Nodes not part of the raft cluster may initiate remote exec commands
+	// but may not know who the current leader of the cluster.  If we are not
+	// the leader, proxy the request to the current leader.
+	if !s.IsLeader() {
+		leaderConn, err := net.DialTimeout("tcp", s.Leader(), 10*time.Second)
+		if err != nil {
+			s.Logger.Printf("dial leader: %v", err)
+			return
+		}
+		defer leaderConn.Close()
+		leaderConn.Write([]byte{MuxExecHeader})
+
+		if err := proxy(leaderConn.(*net.TCPConn), conn.(*net.TCPConn)); err != nil {
+			s.Logger.Printf("leader proxy error: %v", err)
+		}
+		conn.Close()
+		return
+	}
 
 	// Read and execute command.
 	err := func() error {
@@ -499,7 +646,7 @@ func (s *Store) handleExecConn(conn net.Conn) {
 	// Build response message.
 	var resp internal.Response
 	resp.OK = proto.Bool(err == nil)
-	resp.Index = proto.Uint64(s.raft.LastIndex())
+	resp.Index = proto.Uint64(s.raftState.lastIndex())
 	if err != nil {
 		resp.Error = proto.String(err.Error())
 	}
@@ -513,6 +660,32 @@ func (s *Store) handleExecConn(conn net.Conn) {
 		s.Logger.Printf("unable to write exec response: %s", err)
 	}
 	conn.Close()
+}
+
+// serveRPCListener processes remote exec connections.
+// This function runs in a separate goroutine.
+func (s *Store) serveRPCListener() {
+	defer s.wg.Done()
+
+	for {
+		// Accept next TCP connection.
+		conn, err := s.RPCListener.Accept()
+		if err != nil {
+			if strings.Contains(err.Error(), "connection closed") {
+				return
+			} else {
+				s.Logger.Printf("temporary accept error: %s", err)
+				continue
+			}
+		}
+
+		// Handle connection in a separate goroutine.
+		s.wg.Add(1)
+		go func() {
+			defer s.wg.Done()
+			s.rpc.handleRPCConn(conn)
+		}()
+	}
 }
 
 // MarshalBinary encodes the store's data to a binary protobuf format.
@@ -660,11 +833,11 @@ func (s *Store) CreateDatabaseIfNotExists(name string) (*DatabaseInfo, error) {
 	}
 
 	// Attempt to create database.
-	if di, err := s.CreateDatabase(name); err == ErrDatabaseExists {
+	di, err := s.CreateDatabase(name)
+	if err == ErrDatabaseExists {
 		return s.Database(name)
-	} else {
-		return di, err
 	}
+	return di, err
 }
 
 // DropDatabase removes a database from the metastore by name.
@@ -749,11 +922,11 @@ func (s *Store) CreateRetentionPolicyIfNotExists(database string, rpi *Retention
 	}
 
 	// Attempt to create policy.
-	if other, err := s.CreateRetentionPolicy(database, rpi); err == ErrRetentionPolicyExists {
+	other, err := s.CreateRetentionPolicy(database, rpi)
+	if err == ErrRetentionPolicyExists {
 		return s.RetentionPolicy(database, rpi.Name)
-	} else {
-		return other, err
 	}
+	return other, err
 }
 
 // SetDefaultRetentionPolicy sets the default retention policy for a database.
@@ -833,11 +1006,11 @@ func (s *Store) CreateShardGroupIfNotExists(database, policy string, timestamp t
 	}
 
 	// Attempt to create database.
-	if sgi, err := s.CreateShardGroup(database, policy, timestamp); err == ErrShardGroupExists {
+	sgi, err := s.CreateShardGroup(database, policy, timestamp)
+	if err == ErrShardGroupExists {
 		return s.ShardGroupByTimestamp(database, policy, timestamp)
-	} else {
-		return sgi, err
 	}
+	return sgi, err
 }
 
 // DeleteShardGroup removes an existing shard group from a policy by ID.
@@ -863,7 +1036,8 @@ func (s *Store) ShardGroups(database, policy string) (a []ShardGroupInfo, err er
 	return
 }
 
-// ShardGroupsByTimeRange returns a slice of ShardGroups that may contain data for the given time range
+// ShardGroupsByTimeRange returns a slice of ShardGroups that may contain data for the given time range. ShardGroups
+// are sorted by start time.
 func (s *Store) ShardGroupsByTimeRange(database, policy string, tmin, tmax time.Time) (a []ShardGroupInfo, err error) {
 	err = s.read(func(data *Data) error {
 		a, err = data.ShardGroupsByTimeRange(database, policy, tmin, tmax)
@@ -985,19 +1159,47 @@ func (s *Store) AdminUserExists() (exists bool, err error) {
 	return
 }
 
+// ErrAuthenticate is returned when authentication fails.
+var ErrAuthenticate = errors.New("authentication failed")
+
 // Authenticate retrieves a user with a matching username and password.
 func (s *Store) Authenticate(username, password string) (ui *UserInfo, err error) {
 	err = s.read(func(data *Data) error {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+
 		// Find user.
 		u := data.User(username)
 		if u == nil {
 			return ErrUserNotFound
 		}
 
+		// Check the local auth cache first.
+		if au, ok := s.authCache[username]; ok {
+			// verify the password using the cached salt and hash
+			hashed, err := s.hashWithSalt(au.salt, password)
+			if err != nil {
+				return err
+			}
+
+			if bytes.Equal(hashed, au.hash) {
+				ui = u
+				return nil
+			}
+			return ErrAuthenticate
+		}
+
 		// Compare password with user hash.
 		if err := bcrypt.CompareHashAndPassword([]byte(u.Hash), []byte(password)); err != nil {
+			return ErrAuthenticate
+		}
+
+		// generate a salt and hash of the password for the cache
+		salt, hashed, err := s.saltedHash(password)
+		if err != nil {
 			return err
 		}
+		s.authCache[username] = authUser{salt: salt, hash: hashed}
 
 		ui = u
 		return nil
@@ -1005,10 +1207,29 @@ func (s *Store) Authenticate(username, password string) (ui *UserInfo, err error
 	return
 }
 
+// hashWithSalt returns a salted hash of password using salt
+func (s *Store) hashWithSalt(salt []byte, password string) ([]byte, error) {
+	hasher := sha256.New()
+	hasher.Write(append(salt, []byte(password)...))
+	return hasher.Sum(nil), nil
+}
+
+// saltedHash returns a salt and salted hash of password
+func (s *Store) saltedHash(password string) (salt, hash []byte, err error) {
+	salt = make([]byte, SaltBytes)
+	_, err = io.ReadFull(crand.Reader, salt)
+	if err != nil {
+		return
+	}
+
+	hash, err = s.hashWithSalt(salt, password)
+	return
+}
+
 // CreateUser creates a new user in the store.
 func (s *Store) CreateUser(name, password string, admin bool) (*UserInfo, error) {
 	// Hash the password before serializing it.
-	hash, err := HashPassword(password)
+	hash, err := s.hashPassword(password)
 	if err != nil {
 		return nil, err
 	}
@@ -1038,7 +1259,7 @@ func (s *Store) DropUser(name string) error {
 // UpdateUser updates an existing user in the store.
 func (s *Store) UpdateUser(name, password string) error {
 	// Hash the password before serializing it.
-	hash, err := HashPassword(password)
+	hash, err := s.hashPassword(password)
 	if err != nil {
 		return err
 	}
@@ -1063,10 +1284,29 @@ func (s *Store) SetPrivilege(username, database string, p influxql.Privilege) er
 	)
 }
 
+// SetAdminPrivilege sets the admin privilege for a user on a database.
+func (s *Store) SetAdminPrivilege(username string, admin bool) error {
+	return s.exec(internal.Command_SetAdminPrivilegeCommand, internal.E_SetAdminPrivilegeCommand_Command,
+		&internal.SetAdminPrivilegeCommand{
+			Username: proto.String(username),
+			Admin:    proto.Bool(admin),
+		},
+	)
+}
+
 // UserPrivileges returns a list of all databases.
 func (s *Store) UserPrivileges(username string) (p map[string]influxql.Privilege, err error) {
 	err = s.read(func(data *Data) error {
 		p, err = data.UserPrivileges(username)
+		return err
+	})
+	return
+}
+
+// UserPrivilege returns the privilege for a database.
+func (s *Store) UserPrivilege(username, database string) (p *influxql.Privilege, err error) {
+	err = s.read(func(data *Data) error {
+		p, err = data.UserPrivilege(username, database)
 		return err
 	})
 	return
@@ -1171,8 +1411,7 @@ func (s *Store) read(fn func(*Data) error) error {
 var errInvalidate = errors.New("invalidate cache")
 
 func (s *Store) invalidate() error {
-	time.Sleep(1 * time.Second)
-	return nil // FIXME(benbjohnson): Reload cache from the leader.
+	return s.raftState.invalidate()
 }
 
 func (s *Store) exec(typ internal.Command_Type, desc *proto.ExtensionDesc, value interface{}) error {
@@ -1187,36 +1426,21 @@ func (s *Store) exec(typ internal.Command_Type, desc *proto.ExtensionDesc, value
 
 	// Apply the command if this is the leader.
 	// Otherwise remotely execute the command against the current leader.
-	if s.raft.State() == raft.Leader {
+	if s.raftState.isLeader() {
 		return s.apply(b)
-	} else {
-		return s.remoteExec(b)
 	}
+	return s.remoteExec(b)
 }
 
 // apply applies a serialized command to the raft log.
 func (s *Store) apply(b []byte) error {
-	// Apply to raft log.
-	f := s.raft.Apply(b, 0)
-	if err := f.Error(); err != nil {
-		return err
-	}
-
-	// Return response if it's an error.
-	// No other non-nil objects should be returned.
-	resp := f.Response()
-	if err, ok := resp.(error); ok {
-		return lookupError(err)
-	}
-	assert(resp == nil, "unexpected response: %#v", resp)
-
-	return nil
+	return s.raftState.apply(b)
 }
 
 // remoteExec sends an encoded command to the remote leader.
 func (s *Store) remoteExec(b []byte) error {
 	// Retrieve the current known leader.
-	leader := s.raft.Leader()
+	leader := s.raftState.leader()
 	if leader == "" {
 		return errors.New("no leader")
 	}
@@ -1275,30 +1499,34 @@ func (s *Store) remoteExec(b []byte) error {
 
 // sync polls the state machine until it reaches a given index.
 func (s *Store) sync(index uint64, timeout time.Duration) error {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
+	return s.raftState.sync(index, timeout)
+}
 
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
+func (s *Store) cachedData() *Data {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.data.Clone()
+}
 
-	for {
-		// Wait for next tick or timeout.
-		select {
-		case <-ticker.C:
-		case <-timer.C:
-			return errors.New("timeout")
-		}
+// BcryptCost is the cost associated with generating password with Bcrypt.
+// This setting is lowered during testing to improve test suite performance.
+var BcryptCost = 10
 
-		// Compare index against current metadata.
-		s.mu.Lock()
-		ok := (s.data.Index >= index)
-		s.mu.Unlock()
+// HashPasswordFn represnets a password hashing function.
+type HashPasswordFn func(password string) ([]byte, error)
 
-		// Exit if we are at least at the given index.
-		if ok {
-			return nil
-		}
-	}
+// GetHashPasswordFn returns the current password hashing function.
+func (s *Store) GetHashPasswordFn() HashPasswordFn {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.hashPassword
+}
+
+// SetHashPasswordFn sets the password hashing function.
+func (s *Store) SetHashPasswordFn(fn HashPasswordFn) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hashPassword = fn
 }
 
 // storeFSM represents the finite state machine used by Store to interact with Raft.
@@ -1349,6 +1577,8 @@ func (fsm *storeFSM) Apply(l *raft.Log) interface{} {
 			return fsm.applyUpdateUserCommand(&cmd)
 		case internal.Command_SetPrivilegeCommand:
 			return fsm.applySetPrivilegeCommand(&cmd)
+		case internal.Command_SetAdminPrivilegeCommand:
+			return fsm.applySetAdminPrivilegeCommand(&cmd)
 		case internal.Command_SetDataCommand:
 			return fsm.applySetDataCommand(&cmd)
 		default:
@@ -1359,6 +1589,8 @@ func (fsm *storeFSM) Apply(l *raft.Log) interface{} {
 	// Copy term and index to new metadata.
 	fsm.data.Term = l.Term
 	fsm.data.Index = l.Index
+	close(s.changed)
+	s.changed = make(chan struct{})
 
 	return err
 }
@@ -1578,6 +1810,7 @@ func (fsm *storeFSM) applyDropUserCommand(cmd *internal.Command) interface{} {
 		return err
 	}
 	fsm.data = other
+	delete(fsm.authCache, v.GetName())
 	return nil
 }
 
@@ -1591,6 +1824,7 @@ func (fsm *storeFSM) applyUpdateUserCommand(cmd *internal.Command) interface{} {
 		return err
 	}
 	fsm.data = other
+	delete(fsm.authCache, v.GetName())
 	return nil
 }
 
@@ -1601,6 +1835,19 @@ func (fsm *storeFSM) applySetPrivilegeCommand(cmd *internal.Command) interface{}
 	// Copy data and update.
 	other := fsm.data.Clone()
 	if err := other.SetPrivilege(v.GetUsername(), v.GetDatabase(), influxql.Privilege(v.GetPrivilege())); err != nil {
+		return err
+	}
+	fsm.data = other
+	return nil
+}
+
+func (fsm *storeFSM) applySetAdminPrivilegeCommand(cmd *internal.Command) interface{} {
+	ext, _ := proto.GetExtension(cmd, internal.E_SetAdminPrivilegeCommand_Command)
+	v := ext.(*internal.SetAdminPrivilegeCommand)
+
+	// Copy data and update.
+	other := fsm.data.Clone()
+	if err := other.SetAdminPrivilege(v.GetUsername(), v.GetAdmin()); err != nil {
 		return err
 	}
 	fsm.data = other
@@ -1736,18 +1983,6 @@ type RetentionPolicyUpdate struct {
 func (rpu *RetentionPolicyUpdate) SetName(v string)            { rpu.Name = &v }
 func (rpu *RetentionPolicyUpdate) SetDuration(v time.Duration) { rpu.Duration = &v }
 func (rpu *RetentionPolicyUpdate) SetReplicaN(v int)           { rpu.ReplicaN = &v }
-
-// BcryptCost is the cost associated with generating password with Bcrypt.
-// This setting is lowered during testing to improve test suite performance.
-var BcryptCost = 10
-
-// HashPassword generates a cryptographically secure hash for password.
-// Returns an error if the password is invalid or a hash cannot be generated.
-var HashPassword = func(password string) ([]byte, error) {
-	// The second arg is the cost of the hashing, higher is slower but makes
-	// it harder to brute force, since it will be really slow and impractical
-	return bcrypt.GenerateFromPassword([]byte(password), BcryptCost)
-}
 
 // assert will panic with a given formatted message if the given condition is false.
 func assert(condition bool, msg string, v ...interface{}) {

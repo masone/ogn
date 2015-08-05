@@ -37,33 +37,33 @@
 		},
 		{
 			"ImportPath": "github.com/influxdb/influxdb/client",
-			"Comment": "v0.9.1-rc1-22-ge63c59a",
-			"Rev": "e63c59abddf340e6b9456f20b86c244b247ac279"
+			"Comment": "v0.9.1-rc1-347-gaffd0b1",
+			"Rev": "affd0b1ca27a42dc04cd8f4a2e7bba596c4b41c9"
 		},
 		{
 			"ImportPath": "github.com/influxdb/influxdb/influxql",
-			"Comment": "v0.9.1-rc1-22-ge63c59a",
-			"Rev": "e63c59abddf340e6b9456f20b86c244b247ac279"
+			"Comment": "v0.9.1-rc1-347-gaffd0b1",
+			"Rev": "affd0b1ca27a42dc04cd8f4a2e7bba596c4b41c9"
 		},
 		{
 			"ImportPath": "github.com/influxdb/influxdb/meta",
-			"Comment": "v0.9.1-rc1-22-ge63c59a",
-			"Rev": "e63c59abddf340e6b9456f20b86c244b247ac279"
+			"Comment": "v0.9.1-rc1-347-gaffd0b1",
+			"Rev": "affd0b1ca27a42dc04cd8f4a2e7bba596c4b41c9"
 		},
 		{
 			"ImportPath": "github.com/influxdb/influxdb/snapshot",
-			"Comment": "v0.9.1-rc1-22-ge63c59a",
-			"Rev": "e63c59abddf340e6b9456f20b86c244b247ac279"
+			"Comment": "v0.9.1-rc1-347-gaffd0b1",
+			"Rev": "affd0b1ca27a42dc04cd8f4a2e7bba596c4b41c9"
 		},
 		{
 			"ImportPath": "github.com/influxdb/influxdb/toml",
-			"Comment": "v0.9.1-rc1-22-ge63c59a",
-			"Rev": "e63c59abddf340e6b9456f20b86c244b247ac279"
+			"Comment": "v0.9.1-rc1-347-gaffd0b1",
+			"Rev": "affd0b1ca27a42dc04cd8f4a2e7bba596c4b41c9"
 		},
 		{
 			"ImportPath": "github.com/influxdb/influxdb/tsdb",
-			"Comment": "v0.9.1-rc1-22-ge63c59a",
-			"Rev": "e63c59abddf340e6b9456f20b86c244b247ac279"
+			"Comment": "v0.9.1-rc1-347-gaffd0b1",
+			"Rev": "affd0b1ca27a42dc04cd8f4a2e7bba596c4b41c9"
 		},
 		{
 			"ImportPath": "github.com/joho/godotenv",

@@ -10,6 +10,7 @@ import (
 type StatementExecutor struct {
 	Store interface {
 		Nodes() ([]NodeInfo, error)
+		Peers() ([]string, error)
 
 		Database(name string) (*DatabaseInfo, error)
 		Databases() ([]DatabaseInfo, error)
@@ -27,7 +28,9 @@ type StatementExecutor struct {
 		UpdateUser(name, password string) error
 		DropUser(name string) error
 		SetPrivilege(username, database string, p influxql.Privilege) error
+		SetAdminPrivilege(username string, admin bool) error
 		UserPrivileges(username string) (map[string]influxql.Privilege, error)
+		UserPrivilege(username, database string) (*influxql.Privilege, error)
 
 		CreateContinuousQuery(database, name, query string) error
 		DropContinuousQuery(database, name string) error
@@ -57,8 +60,12 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement) *influxql.
 		return e.executeShowUsersStatement(stmt)
 	case *influxql.GrantStatement:
 		return e.executeGrantStatement(stmt)
+	case *influxql.GrantAdminStatement:
+		return e.executeGrantAdminStatement(stmt)
 	case *influxql.RevokeStatement:
 		return e.executeRevokeStatement(stmt)
+	case *influxql.RevokeAdminStatement:
+		return e.executeRevokeAdminStatement(stmt)
 	case *influxql.CreateRetentionPolicyStatement:
 		return e.executeCreateRetentionPolicyStatement(stmt)
 	case *influxql.AlterRetentionPolicyStatement:
@@ -73,6 +80,8 @@ func (e *StatementExecutor) ExecuteStatement(stmt influxql.Statement) *influxql.
 		return e.executeDropContinuousQueryStatement(stmt)
 	case *influxql.ShowContinuousQueriesStatement:
 		return e.executeShowContinuousQueriesStatement(stmt)
+	case *influxql.ShowStatsStatement:
+		return e.executeShowStatsStatement(stmt)
 	default:
 		panic(fmt.Sprintf("unsupported statement type: %T", stmt))
 	}
@@ -119,20 +128,20 @@ func (e *StatementExecutor) executeShowServersStatement(q *influxql.ShowServersS
 		return &influxql.Result{Err: err}
 	}
 
-	row := &influxql.Row{Columns: []string{"id", "url"}}
+	peers, err := e.Store.Peers()
+	if err != nil {
+		return &influxql.Result{Err: err}
+	}
+
+	row := &influxql.Row{Columns: []string{"id", "url", "raft"}}
 	for _, ni := range nis {
-		row.Values = append(row.Values, []interface{}{ni.ID, "http://" + ni.Host})
+		row.Values = append(row.Values, []interface{}{ni.ID, "http://" + ni.Host, contains(peers, ni.Host)})
 	}
 	return &influxql.Result{Series: []*influxql.Row{row}}
 }
 
 func (e *StatementExecutor) executeCreateUserStatement(q *influxql.CreateUserStatement) *influxql.Result {
-	admin := false
-	if q.Privilege != nil {
-		admin = (*q.Privilege == influxql.AllPrivileges)
-	}
-
-	_, err := e.Store.CreateUser(q.Name, q.Password, admin)
+	_, err := e.Store.CreateUser(q.Name, q.Password, q.Admin)
 	return &influxql.Result{Err: err}
 }
 
@@ -161,8 +170,28 @@ func (e *StatementExecutor) executeGrantStatement(stmt *influxql.GrantStatement)
 	return &influxql.Result{Err: e.Store.SetPrivilege(stmt.User, stmt.On, stmt.Privilege)}
 }
 
+func (e *StatementExecutor) executeGrantAdminStatement(stmt *influxql.GrantAdminStatement) *influxql.Result {
+	return &influxql.Result{Err: e.Store.SetAdminPrivilege(stmt.User, true)}
+}
+
 func (e *StatementExecutor) executeRevokeStatement(stmt *influxql.RevokeStatement) *influxql.Result {
-	return &influxql.Result{Err: e.Store.SetPrivilege(stmt.User, stmt.On, influxql.NoPrivileges)}
+	priv := influxql.NoPrivileges
+
+	// Revoking all privileges means there's no need to look at existing user privileges.
+	if stmt.Privilege != influxql.AllPrivileges {
+		p, err := e.Store.UserPrivilege(stmt.User, stmt.On)
+		if err != nil {
+			return &influxql.Result{Err: err}
+		}
+		// Bit clear (AND NOT) the user's privilege with the revoked privilege.
+		priv = *p &^ stmt.Privilege
+	}
+
+	return &influxql.Result{Err: e.Store.SetPrivilege(stmt.User, stmt.On, priv)}
+}
+
+func (e *StatementExecutor) executeRevokeAdminStatement(stmt *influxql.RevokeAdminStatement) *influxql.Result {
+	return &influxql.Result{Err: e.Store.SetAdminPrivilege(stmt.User, false)}
 }
 
 func (e *StatementExecutor) executeCreateRetentionPolicyStatement(stmt *influxql.CreateRetentionPolicyStatement) *influxql.Result {
@@ -250,4 +279,8 @@ func (e *StatementExecutor) executeShowContinuousQueriesStatement(stmt *influxql
 		rows = append(rows, row)
 	}
 	return &influxql.Result{Series: rows}
+}
+
+func (e *StatementExecutor) executeShowStatsStatement(stmt *influxql.ShowStatsStatement) *influxql.Result {
+	return &influxql.Result{Err: fmt.Errorf("SHOW STATS is not implemented yet")}
 }

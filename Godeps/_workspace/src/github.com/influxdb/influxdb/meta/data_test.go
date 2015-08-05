@@ -245,7 +245,7 @@ func TestData_RetentionPolicy(t *testing.T) {
 	}
 }
 
-// Ensure that retrieveing a policy from a non-existent database returns an error.
+// Ensure that retrieving a policy from a non-existent database returns an error.
 func TestData_RetentionPolicy_ErrDatabaseNotFound(t *testing.T) {
 	var data meta.Data
 	if _, err := data.RetentionPolicy("db0", "rp0"); err != meta.ErrDatabaseNotFound {
@@ -306,6 +306,9 @@ func TestData_CreateShardGroup(t *testing.T) {
 		},
 	}) {
 		t.Fatalf("unexpected shard group: %#v", sgi)
+	} else if !sgi.Shards[0].OwnedBy(1) || !sgi.Shards[0].OwnedBy(2) || sgi.Shards[0].OwnedBy(3) {
+		// Verify shard is correctly owned-by the node.
+		t.Fatalf("new shard is not owned by correct node")
 	}
 }
 
