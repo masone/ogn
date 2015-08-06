@@ -33,7 +33,7 @@ func process_message(p *fap.Packet) {
 		b = Beacon{Packet: p, Comment: c, Aircraft: a}
 		if b.Comment.Id != "" {
 			cs := fmt.Sprintf("%s (%s)", b.Aircraft.Registration, b.Aircraft.Callsign)
-			startlist.ProcessEntry(b.Comment.Id, cs, b.Packet.Latitude, b.Packet.Longitude, b.Packet.Altitude, b.Comment.ClimbRate)
+			startlist.ProcessEntry(b.Packet.Timestamp, b.Comment.Id, cs, b.Packet.Latitude, b.Packet.Longitude, b.Packet.Altitude, b.Comment.ClimbRate)
 		}
 	} else {
 		b = Beacon{Packet: p, Comment: c}

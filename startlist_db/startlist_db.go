@@ -35,7 +35,7 @@ func Init() {
 	}
 }
 
-func InsertLanding(id string, cs string) {
+func InsertLanding(t time.Time, id string, cs string) {
 	point := influxdb.Point{
 		Measurement: "landings",
 		Tags: map[string]string{
@@ -44,13 +44,13 @@ func InsertLanding(id string, cs string) {
 		Fields: map[string]interface{}{
 			"cs": cs, // not indexed
 		},
-		Time: time.Now(),
+		Time: t,
 	}
 
 	insertPoint(point)
 }
 
-func InsertStart(id string, cs string, launch_type string) {
+func InsertStart(t time.Time, id string, cs string, launch_type string) {
 	point := influxdb.Point{
 		Measurement: "starts",
 		Tags: map[string]string{
@@ -60,13 +60,13 @@ func InsertStart(id string, cs string, launch_type string) {
 			"cs":          cs, // not indexed
 			"launch_type": launch_type,
 		},
-		Time: time.Now(),
+		Time: t,
 	}
 
 	insertPoint(point)
 }
 
-func InsertPosition(id string, cs string, p string) {
+func InsertPosition(t time.Time, id string, cs string, p string) {
 	point := influxdb.Point{
 		Measurement: "positions",
 		Tags: map[string]string{
@@ -77,13 +77,13 @@ func InsertPosition(id string, cs string, p string) {
 			"cs":  cs, // not indexed
 			"pos": p,
 		},
-		Time: time.Now(),
+		Time: t,
 	}
 
 	insertPoint(point)
 }
 
-func InsertClimbRate(id string, cs string, climb_rate float64) {
+func InsertClimbRate(t time.Time, id string, cs string, climb_rate float64) {
 	point := influxdb.Point{
 		Measurement: "climb_rates",
 		Tags: map[string]string{
@@ -93,13 +93,13 @@ func InsertClimbRate(id string, cs string, climb_rate float64) {
 			"cs":   cs, // not indexed
 			"rate": climb_rate,
 		},
-		Time: time.Now(),
+		Time: t,
 	}
 
 	insertPoint(point)
 }
 
-func InsertAltitude(id string, cs string, alt float64) {
+func InsertAltitude(t time.Time, id string, cs string, alt float64) {
 	point := influxdb.Point{
 		Measurement: "altitudes",
 		Tags: map[string]string{
@@ -109,17 +109,19 @@ func InsertAltitude(id string, cs string, alt float64) {
 			"cs":  cs, // not indexed
 			"alt": alt,
 		},
-		Time: time.Now(),
+		Time: t,
 	}
 
 	insertPoint(point)
 }
 
-func GetLastPosition(id string) (p string) {
+func GetLastPosition(id string, t time.Time) (p string) {
 	cmd := fmt.Sprintf(
-		"SELECT LAST(pos) FROM %s WHERE id='%s' AND time > now() - 5m LIMIT 1",
+		"SELECT LAST(pos) FROM %s WHERE id='%s' AND time < %ds AND time > %ds - 5m LIMIT 1",
 		"positions",
 		id,
+		t.Unix(),
+		t.Unix(),
 	)
 
 	q := influxdb.Query{
@@ -143,16 +145,13 @@ func GetLastPosition(id string) (p string) {
 	return
 }
 
-type ClimbResponse struct {
-	Id    string `json:"id"`
-	Title string `json:"title"`
-}
-
-func GetAverageClimb(id string) (c float64) {
+func GetRecentMaxAlt(id string, t time.Time) (c float64) {
 	cmd := fmt.Sprintf(
-		"SELECT DERIVATIVE(alt) FROM %s WHERE id='%s' AND time > now() - 30s",
+		"SELECT MAX(alt) FROM %s WHERE id='%s' AND time < %ds AND time > %ds - 30s",
 		"altitudes",
 		id,
+		t.Unix(),
+		t.Unix(),
 	)
 
 	q := influxdb.Query{
