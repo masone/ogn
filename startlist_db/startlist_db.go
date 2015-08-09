@@ -57,7 +57,8 @@ func InsertStart(t time.Time, id string, cs string, launch_type string) {
 			"id": id, // indexed
 		},
 		Fields: map[string]interface{}{
-			"cs":          cs, // not indexed
+			// not indexed
+			"cs":          cs,
 			"launch_type": launch_type,
 		},
 		Time: t,
@@ -66,48 +67,23 @@ func InsertStart(t time.Time, id string, cs string, launch_type string) {
 	insertPoint(point)
 }
 
-func InsertPosition(t time.Time, id string, cs string, p string) {
+func InsertPosition(t time.Time, id string, cs string, pos string, cr float64, alt float64, lat float64, lon float64) {
 	point := influxdb.Point{
 		Measurement: "positions",
 		Tags: map[string]string{
-			"id":  id, // indexed
-			"pos": p,  // indexed
+			// indexed
+			"id":  id,
+			"cs":  cs,
+			"pos": pos,
 		},
 		Fields: map[string]interface{}{
-			"cs":  cs, // not indexed
-			"pos": p,
-		},
-		Time: t,
-	}
-
-	insertPoint(point)
-}
-
-func InsertClimbRate(t time.Time, id string, cs string, climb_rate float64) {
-	point := influxdb.Point{
-		Measurement: "climb_rates",
-		Tags: map[string]string{
-			"id": id, // indexed
-		},
-		Fields: map[string]interface{}{
-			"cs":   cs, // not indexed
-			"rate": climb_rate,
-		},
-		Time: t,
-	}
-
-	insertPoint(point)
-}
-
-func InsertAltitude(t time.Time, id string, cs string, alt float64) {
-	point := influxdb.Point{
-		Measurement: "altitudes",
-		Tags: map[string]string{
-			"id": id, // indexed
-		},
-		Fields: map[string]interface{}{
-			"cs":  cs, // not indexed
+			// not indexed
+			"pos": pos,
+			"cs":  cs,
+			"cr":  cr,
 			"alt": alt,
+			"lat": lat,
+			"lon": lon,
 		},
 		Time: t,
 	}
@@ -134,9 +110,7 @@ func GetLastPosition(id string, t time.Time) (p string) {
 			log.Fatal(response.Error())
 		} else {
 			res := response.Results
-
 			series := res[0].Series
-
 			if len(series) != 0 && series[0].Values[0][1] != nil {
 				return series[0].Values[0][1].(string)
 			}
@@ -148,7 +122,7 @@ func GetLastPosition(id string, t time.Time) (p string) {
 func GetRecentMaxAlt(id string, t time.Time) (c float64) {
 	cmd := fmt.Sprintf(
 		"SELECT MAX(alt) FROM %s WHERE id='%s' AND time < %ds AND time > %ds - 30s",
-		"altitudes",
+		"positions",
 		id,
 		t.Unix(),
 		t.Unix(),
@@ -164,9 +138,40 @@ func GetRecentMaxAlt(id string, t time.Time) (c float64) {
 			log.Fatal(response.Error())
 		} else {
 			res := response.Results
-
 			series := res[0].Series
+			if len(series) != 0 {
+				val, err := series[0].Values[0][1].(json.Number).Float64()
+				if err != nil {
+					log.Fatal(err)
+				}
 
+				return val
+			}
+		}
+	}
+	return 0.0
+}
+
+func GetRecentStarts(id string, t time.Time) (c float64) {
+	cmd := fmt.Sprintf(
+		"SELECT MAX(alt) FROM %s WHERE id='%s' AND time < %ds AND time > %ds - 30s",
+		"positions",
+		id,
+		t.Unix(),
+		t.Unix(),
+	)
+
+	q := influxdb.Query{
+		Command:  cmd,
+		Database: os.Getenv("INFLUX_DATABASE"),
+	}
+
+	if response, err := connection.Query(q); err == nil {
+		if response.Error() != nil {
+			log.Fatal(response.Error())
+		} else {
+			res := response.Results
+			series := res[0].Series
 			if len(series) != 0 {
 				val, err := series[0].Values[0][1].(json.Number).Float64()
 				if err != nil {
