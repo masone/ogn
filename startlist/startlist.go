@@ -33,23 +33,23 @@ func ProcessEntry(t time.Time, id string, cs string, lat float64, lon float64, a
 	var pos string
 	if near_coordinates(lat, lon) && near_altitude(alt) {
 		pos = "gnd"
-		startlist_db.InsertPosition(t, id, cs, pos, climb_rate, alt, lat, lon)
 		handleOnGround(t, id, cs)
 	} else {
 		pos = "air"
-		startlist_db.InsertPosition(t, id, cs, pos, climb_rate, alt, lat, lon)
 		handleAirborne(t, id, cs)
 	}
+
+	startlist_db.InsertPosition(t, id, cs, pos, climb_rate, alt, lat, lon)
 }
 
 func handleOnGround(t time.Time, id string, cs string) {
 	lastPosition := startlist_db.GetLastPosition(id, t)
 
 	if lastPosition == "air" {
-		fmt.Printf("*** %s landed %s at %s\n", cs, t, id)
+		//fmt.Printf("*** %s landed %s at %s\n", cs, t, id)
 		startlist_db.InsertLanding(t, id, cs)
 	} else {
-		fmt.Printf("    %s still on ground %s\n", cs, id)
+		//fmt.Printf("    %s still on ground %s\n", cs, id)
 	}
 }
 
@@ -63,7 +63,7 @@ func handleAirborne(t time.Time, id string, cs string) {
 		fmt.Printf("*** %s started (%s) at %s, %s\n", cs, launch_type, t, id)
 		startlist_db.InsertStart(t, id, cs, launch_type)
 	} else {
-		fmt.Printf("    %s still airborne %s\n", cs, id)
+		//fmt.Printf("    %s still airborne %s\n", cs, id)
 	}
 }
 
@@ -79,8 +79,17 @@ func detectLaunchType(id string, t time.Time) string {
 }
 
 func detectTow(id string, t time.Time) bool {
-	startlist_db.GetRecentStarts(id, t)
-	return false
+	last_id := startlist_db.GetLastStart(id, t)
+	if last_id != "" {
+		alts1 := startlist_db.GetRecentAltitudes(id, t)
+		alts2 := startlist_db.GetRecentAltitudes(last_id, t)
+
+		fmt.Println(alts1)
+		fmt.Println(alts2)
+		return true
+	} else {
+		return false
+	}
 }
 
 func near_coordinates(lat float64, lon float64) bool {
