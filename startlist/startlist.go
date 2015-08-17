@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/kellydunn/golang-geo"
 	"github.com/masone/ogn/startlist_db"
+	"math"
 	"os"
 	"strconv"
 	"time"
@@ -14,7 +15,8 @@ var (
 	home_elevation         float64
 	elevation_threshold    float64 = 20  // in meters
 	distance_threshold     float64 = 2   // in kilometers
-	winch_launch_threshold float64 = 500 // in meters
+	winch_launch_threshold float64 = 400 // in meters
+	tow_threshold          float64 = 20
 )
 
 func Init() {
@@ -58,7 +60,6 @@ func handleAirborne(t time.Time, id string, cs string) {
 
 	if lastPosition == "gnd" {
 		launch_type := detectLaunchType(id, t)
-		//tow := detectTow(id, t)
 
 		fmt.Printf("*** %s started (%s) at %s, %s\n", cs, launch_type, t, id)
 		startlist_db.InsertStart(t, id, cs, launch_type)
@@ -69,7 +70,8 @@ func handleAirborne(t time.Time, id string, cs string) {
 
 func detectLaunchType(id string, t time.Time) string {
 	max := startlist_db.GetRecentMaxAlt(id, t)
-	if (max - home_elevation) > winch_launch_threshold {
+	diff := max - home_elevation
+	if diff > winch_launch_threshold {
 		return "W"
 	} else if detectTow(id, t) {
 		return "A"
@@ -79,17 +81,21 @@ func detectLaunchType(id string, t time.Time) string {
 }
 
 func detectTow(id string, t time.Time) bool {
-	last_id := startlist_db.GetLastStart(id, t)
+	last_id := startlist_db.GetRecentParallelStart(id, t)
+	fmt.Println(last_id)
 	if last_id != "" {
-		alts1 := startlist_db.GetRecentAltitudes(id, t)
-		alts2 := startlist_db.GetRecentAltitudes(last_id, t)
+		alts1 := startlist_db.GetRecentAvgAltitude(id, t)
+		alts2 := startlist_db.GetRecentAvgAltitude(last_id, t)
 
-		fmt.Println(alts1)
-		fmt.Println(alts2)
-		return true
-	} else {
-		return false
+		diff := math.Abs(alts2 - alts1)
+
+		fmt.Printf("    %s started in parallel with %s - h diff %f\n", id, last_id, diff)
+		if diff < tow_threshold {
+			fmt.Println("")
+			return true
+		}
 	}
+	return false
 }
 
 func near_coordinates(lat float64, lon float64) bool {
