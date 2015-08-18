@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/jinzhu/gorm"
 	"time"
+	"os"
 )
 
 type Flight struct {
@@ -29,12 +30,12 @@ type Position struct {
 var db gorm.DB
 
 func Init() {
-	var err error
-	db, err = gorm.Open("postgres", "dbname=ogn sslmode=disable")
+  	var err error
+	db, err = gorm.Open("postgres", os.Getenv("DATABASE_URL"))
 	checkErr(err)
 
-	// db.CreateTable(&Flight{})
-	// db.CreateTable(&Position{})
+	//db.CreateTable(&Flight{})
+	//db.CreateTable(&Position{})
 	fmt.Println("")
 }
 
