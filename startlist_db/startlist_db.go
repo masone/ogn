@@ -1,228 +1,159 @@
 package startlist_db
 
 import (
-	"encoding/json"
 	"fmt"
-	influxdb "github.com/influxdb/influxdb/client"
-	"log"
-	"net/url"
-	"os"
+	"github.com/jinzhu/gorm"
 	"time"
 )
 
-var connection *influxdb.Client
+type Flight struct {
+	Id         uint   `gorm:"primary_key"`
+	OgnId      string `validate:"presence"`
+	Callsign   string `sql:"size(12)"`
+	LaunchType string `sql:"size(1)"`
+	Start      int64
+	Landing    int64
+}
+type Position struct {
+	Id        uint   `gorm:"primary_key"`
+	Time      int64  `validate:"presence"`
+	OgnId     string `validate:"presence"`
+	Callsign  string `sql:"size(12)"`
+	Position  string `validate:"presence" sql:"size(3)"`
+	ClimbRate float64
+	Altitude  float64 `validate:"presence"`
+	Lat       float64 `validate:"presence"`
+	Lon       float64 `validate:"presence"`
+}
+
+var db gorm.DB
 
 func Init() {
-	u, err := url.Parse(
-		fmt.Sprintf("http://%s:%s",
-			os.Getenv("INFLUX_HOST"),
-			os.Getenv("INFLUX_PORT"),
-		))
+	var err error
+	db, err = gorm.Open("postgres", "dbname=ogn sslmode=disable")
+	checkErr(err)
 
-	if err != nil {
-		log.Fatal(err)
-	}
+	// db.CreateTable(&Flight{})
+	// db.CreateTable(&Position{})
+	fmt.Println("")
+}
 
-	conf := influxdb.Config{
-		URL:      *u,
-		Username: os.Getenv("INFLUX_USERNAME"),
-		Password: os.Getenv("INFLUX_PASSWORD"),
-	}
+func InsertStart(t time.Time, id string, cs string) {
+	flight := initializeFlight(id, cs)
+	flight.Start = t.Unix()
 
-	connection, err = influxdb.NewClient(conf)
-	if err != nil {
-		log.Fatal(err)
-	}
+	db.Save(&flight)
 }
 
 func InsertLanding(t time.Time, id string, cs string) {
-	point := influxdb.Point{
-		Measurement: "landings",
-		Tags: map[string]string{
-			"id": id, // indexed
-		},
-		Fields: map[string]interface{}{
-			"cs": cs, // not indexed
-		},
-		Time: t,
+	var flight Flight
+	var results []Flight
+	db.Where("ogn_id = ? AND landing = 0", id).Last(&results)
+
+	if len(results) > 0 {
+		flight = results[0]
+	} else {
+		flight = initializeFlight(id, cs)
 	}
 
-	insertPoint(point)
-}
+	flight.Landing = t.Unix()
 
-func InsertStart(t time.Time, id string, cs string, launch_type string) {
-	start_offset := 10 // seconds
-
-	point := influxdb.Point{
-		Measurement: "starts",
-		Tags: map[string]string{
-			"id": id, // indexed
-		},
-		Fields: map[string]interface{}{
-			// not indexed
-			"id":          id,
-			"cs":          cs,
-			"launch_type": launch_type,
-		},
-		Time: t.Add(time.Duration(-start_offset) * time.Second),
-	}
-
-	insertPoint(point)
+	query := db.Save(&flight)
+	checkErr(query.Error)
 }
 
 func InsertPosition(t time.Time, id string, cs string, pos string, cr float64, alt float64, lat float64, lon float64) {
-	point := influxdb.Point{
-		Measurement: "positions",
-		Tags: map[string]string{
-			// indexed
-			"id":  id,
-			"cs":  cs,
-			"pos": pos,
-		},
-		Fields: map[string]interface{}{
-			// not indexed
-			"id":  id,
-			"cs":  cs,
-			"pos": pos,
-			"cr":  cr,
-			"alt": alt,
-			"lat": lat,
-			"lon": lon,
-		},
-		Time: t,
+	position := &Position{
+		OgnId:     id,
+		Callsign:  cs,
+		Time:      t.Unix(),
+		Position:  pos,
+		ClimbRate: cr,
+		Altitude:  alt,
+		Lat:       lat,
+		Lon:       lon,
 	}
-
-	insertPoint(point)
+	query := db.Save(position)
+	checkErr(query.Error)
 }
 
 func GetLastPosition(id string, t time.Time) (p string) {
-	cmd := fmt.Sprintf(
-		"SELECT LAST(pos) FROM positions WHERE id='%s' AND time < %ds AND time > %ds - 5m LIMIT 1",
-		id,
-		t.Unix(),
-		t.Unix(),
-	)
+	var results []Position
 
-	q := influxdb.Query{
-		Command:  cmd,
-		Database: os.Getenv("INFLUX_DATABASE"),
-	}
+	past := t.Add(-5 * time.Minute)
+	query := db.
+		Where("ogn_id = ? AND time < ? AND time > ?", id, t.Unix(), past.Unix()).
+		Last(&results)
 
-	if response, err := connection.Query(q); err == nil {
-		if response.Error() != nil {
-			log.Fatal(response.Error())
-		} else {
-			res := response.Results
-			series := res[0].Series
-			if len(series) != 0 && series[0].Values[0][1] != nil {
-				return series[0].Values[0][1].(string)
-			}
-		}
+	checkErr(query.Error)
+	if len(results) > 0 {
+		return results[0].Position
+	} else {
+		return ""
 	}
-	return
 }
 
 func GetRecentMaxAlt(id string, t time.Time) (c float64) {
-	cmd := fmt.Sprintf(
-		"SELECT MAX(alt) FROM positions WHERE id='%s' AND time < %ds AND time > %ds - 30s",
-		id,
-		t.Unix(),
-		t.Unix(),
-	)
+	var results []Position
 
-	q := influxdb.Query{
-		Command:  cmd,
-		Database: os.Getenv("INFLUX_DATABASE"),
+	past := t.Add(-30 * time.Second)
+	query := db.
+		Select("MAX(altitude) as altitude").
+		Where("ogn_id = ? AND time < ? AND time > ?", id, t.Unix(), past.Unix()).
+		Find(&results)
+
+	checkErr(query.Error)
+	if len(results) > 0 {
+		return results[0].Altitude
+	} else {
+		return 0.0
 	}
-
-	if response, err := connection.Query(q); err == nil {
-		if response.Error() != nil {
-			log.Fatal(response.Error())
-		} else {
-			res := response.Results
-			series := res[0].Series
-			if len(series) != 0 {
-				val, err := series[0].Values[0][1].(json.Number).Float64()
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				return val
-			}
-		}
-	}
-	panic("Unreachable")
 }
 
 func GetRecentParallelStart(id string, t time.Time) string {
-	cmd := fmt.Sprintf(
-		"SELECT id FROM starts WHERE id != '%s' AND time < %ds AND time > %ds - 30s LIMIT 1",
-		id,
-		t.Unix(),
-		t.Unix(),
-	)
+	var results []Flight
 
-	q := influxdb.Query{
-		Command:  cmd,
-		Database: os.Getenv("INFLUX_DATABASE"),
-	}
+	past := t.Add(-30 * time.Second)
+	query := db.
+		Select("ogn_id").
+		Where("ogn_id != ? AND start < ? AND start > ?", id, t.Unix(), past.Unix()).
+		Last(&results)
 
-	if response, err := connection.Query(q); err == nil {
-		if response.Error() != nil {
-			log.Fatal(response.Error())
-		} else {
-			res := response.Results
-			series := res[0].Series
-			if len(series) != 0 {
-				return series[0].Values[0][1].(string)
-			}
-		}
+	checkErr(query.Error)
+	if len(results) > 0 {
+		return results[0].OgnId
+	} else {
+		return ""
 	}
-	return ""
 }
 
 func GetRecentAvgAltitude(id string, t time.Time) float64 {
-	cmd := fmt.Sprintf(
-		"SELECT MEAN(alt) FROM positions WHERE id='%s' AND time < %ds AND time > %ds - 30s",
-		id,
-		t.Unix(),
-		t.Unix(),
-	)
+	var results []Position
 
-	q := influxdb.Query{
-		Command:  cmd,
-		Database: os.Getenv("INFLUX_DATABASE"),
+	past := t.Add(-30 * time.Second)
+	query := db.
+		Select("AVG(altitude) as altitude").
+		Where("ogn_id = ? AND time < ? AND time > ?", id, t.Unix(), past.Unix()).
+		Group("id").
+		Last(&results)
+
+	checkErr(query.Error)
+	if len(results) > 0 {
+		return results[0].Altitude
+	} else {
+		return 0.0
 	}
-
-	if response, err := connection.Query(q); err == nil {
-		if response.Error() != nil {
-			log.Fatal(response.Error())
-		} else {
-			res := response.Results
-			series := res[0].Series
-
-			if len(series) != 0 {
-				val, err := series[0].Values[0][1].(json.Number).Float64()
-				if err != nil {
-					log.Fatal(err)
-				}
-
-				return val
-			}
-		}
-	}
-	return 0.0
 }
 
-func insertPoint(p influxdb.Point) {
-	pts := []influxdb.Point{p}
-	bps := influxdb.BatchPoints{
-		Points:          pts,
-		Database:        os.Getenv("INFLUX_DATABASE"),
-		RetentionPolicy: "default",
+func initializeFlight(id string, cs string) Flight {
+	return Flight{
+		OgnId:    id,
+		Callsign: cs,
 	}
-	_, err := connection.Write(bps)
+}
+
+func checkErr(err error) {
 	if err != nil {
-		log.Fatal(err)
+		panic(err)
 	}
 }

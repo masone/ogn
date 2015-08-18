@@ -48,7 +48,7 @@ func handleOnGround(t time.Time, id string, cs string) {
 	lastPosition := startlist_db.GetLastPosition(id, t)
 
 	if lastPosition == "air" {
-		//fmt.Printf("*** %s landed %s at %s\n", cs, t, id)
+		fmt.Printf("*** %s landed %s at %s\n", cs, t, id)
 		startlist_db.InsertLanding(t, id, cs)
 	} else {
 		//fmt.Printf("    %s still on ground %s\n", cs, id)
@@ -59,10 +59,10 @@ func handleAirborne(t time.Time, id string, cs string) {
 	lastPosition := startlist_db.GetLastPosition(id, t)
 
 	if lastPosition == "gnd" {
-		launch_type := detectLaunchType(id, t)
+		launch_type := detectLaunchType(id, t) // TODO: detect winch launch later asynchronously
 
-		fmt.Printf("*** %s started (%s) at %s, %s\n", cs, launch_type, t, id)
-		startlist_db.InsertStart(t, id, cs, launch_type)
+		fmt.Printf("*** %s started (%s) at %s, %s\n", cs, t, id, launch_type)
+		startlist_db.InsertStart(t, id, cs)
 	} else {
 		//fmt.Printf("    %s still airborne %s\n", cs, id)
 	}
@@ -82,7 +82,6 @@ func detectLaunchType(id string, t time.Time) string {
 
 func detectTow(id string, t time.Time) bool {
 	last_id := startlist_db.GetRecentParallelStart(id, t)
-	fmt.Println(last_id)
 	if last_id != "" {
 		alts1 := startlist_db.GetRecentAvgAltitude(id, t)
 		alts2 := startlist_db.GetRecentAvgAltitude(last_id, t)
@@ -91,7 +90,6 @@ func detectTow(id string, t time.Time) bool {
 
 		fmt.Printf("    %s started in parallel with %s - h diff %f\n", id, last_id, diff)
 		if diff < tow_threshold {
-			fmt.Println("")
 			return true
 		}
 	}
