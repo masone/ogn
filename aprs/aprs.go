@@ -58,7 +58,8 @@ func each_message(r *bufio.Reader, processor func(packet *fap.Packet)) {
 	for {
 		line, err := r.ReadString('\n')
 		if err == io.EOF {
-			log.Fatal(err)
+			log.Println(err)
+			return
 		} else if err != nil {
 			panic(err)
 		}
@@ -70,7 +71,7 @@ func each_message(r *bufio.Reader, processor func(packet *fap.Packet)) {
 			if err == nil {
 				processor(packet)
 			} else {
-			    log.Println(line)
+				log.Println(line)
 				log.Fatal(err)
 			}
 		}
