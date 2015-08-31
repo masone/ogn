@@ -2,5 +2,6 @@
 *.a
 *.so
 /tmp
+/log
 ogn
 .env
