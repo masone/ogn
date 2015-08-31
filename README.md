@@ -11,9 +11,14 @@ go build && ./ogn
 ```
 
 You can also read APRS data from a logfile
- ```
- go build && ./ogn aprs.log
- ```
+```
+go build && ./ogn ogn.2015-08-28.log
+```
+
+Global logfiles can get pretty big. You can lower the size by filtering by a nearby receiver:
+```
+grep -e 'LSPH' ogn.2015-08-28.log > lsph.2015-08-28.log
+```
 
 ## Deploy to Heroku
 

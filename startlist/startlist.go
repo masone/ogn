@@ -14,9 +14,9 @@ var (
 	home_point             *geo.Point
 	home_elevation         float64
 	elevation_threshold    float64 = 20  // in meters
-	distance_threshold     float64 = 2   // in kilometers
-	winch_launch_threshold float64 = 400 // in meters
-	tow_threshold          float64 = 20
+	distance_threshold     float64 = 0.5 // in kilometers
+	winch_launch_threshold float64 = 200 // in meters
+	tow_threshold          float64 = 20  // in meters
 )
 
 func Init() {
@@ -26,6 +26,7 @@ func Init() {
 	home_elevation, _ = strconv.ParseFloat(os.Getenv("AF_ELEVATION"), 64)
 
 	startlist_db.Init()
+	fmt.Println("")
 }
 
 func ProcessEntry(t time.Time, id string, cs string, lat float64, lon float64, alt float64, climb_rate float64) {
@@ -33,14 +34,21 @@ func ProcessEntry(t time.Time, id string, cs string, lat float64, lon float64, a
 	//fmt.Printf("    %s - %fkm away - %fm\n", cs, home_point.GreatCircleDistance(plane), alt)
 
 	var pos string
-	if near_coordinates(lat, lon) && near_altitude(alt) {
+	nc := near_coordinates(lat, lon)
+	ng := near_ground(alt)
+
+	if nc && ng {
 		pos = "gnd"
 		handleOnGround(t, id, cs)
-	} else {
+	} else if !nc && !ng {
 		pos = "air"
 		handleAirborne(t, id, cs)
+	} else {
+		// Position is not 100% clear. Store, but don't qualify.
+		// Prevents detecting false starts/landings.
+		// The Flarm altitude is sometimes off (eg. when the device boots up).
+		pos = ""
 	}
-
 	startlist_db.InsertPosition(t, id, cs, pos, climb_rate, alt, lat, lon)
 }
 
@@ -48,7 +56,7 @@ func handleOnGround(t time.Time, id string, cs string) {
 	lastPosition := startlist_db.GetLastPosition(id, t)
 
 	if lastPosition == "air" {
-		fmt.Printf("*** %s landed %s at %s\n", cs, t, id)
+		//fmt.Printf("*** %s landed %s at %s\n", cs, t, id)
 		startlist_db.InsertLanding(t, id, cs)
 	} else {
 		//fmt.Printf("    %s still on ground %s\n", cs, id)
@@ -59,36 +67,48 @@ func handleAirborne(t time.Time, id string, cs string) {
 	lastPosition := startlist_db.GetLastPosition(id, t)
 
 	if lastPosition == "gnd" {
-		launch_type := detectLaunchType(id, t) // TODO: detect winch launch later asynchronously
-
-		fmt.Printf("*** %s started (%s) at %s, %s\n", cs, t, id, launch_type)
+		//fmt.Printf("*** %s started (%s) at %s\n", cs, t, id)
 		startlist_db.InsertStart(t, id, cs)
+
+		go func() {
+			delay := 20 * time.Second
+			delayed := t.Add(delay)
+			time.Sleep(delay)
+			detectLaunchType(id, t, delayed, cs)
+		}() // TODO: sync
 	} else {
 		//fmt.Printf("    %s still airborne %s\n", cs, id)
 	}
 }
 
-func detectLaunchType(id string, t time.Time) string {
+func detectLaunchType(id string, t time.Time, dt time.Time, cs string) string {
 	max := startlist_db.GetRecentMaxAlt(id, t)
-	diff := max - home_elevation
-	if diff > winch_launch_threshold {
-		return "W"
-	} else if detectTow(id, t) {
-		return "A"
+	diff := math.Abs(max - home_elevation)
+
+	var lt string
+	if detectTow(id, t, dt, cs) {
+		lt = "A"
+	} else if diff > winch_launch_threshold {
+		//fmt.Printf("    %s started W (%s), height gain %f\n", cs, t, diff)
+		lt = "W"
 	} else {
-		return "S"
+		//fmt.Printf("    %s started S (%s), height gain %f\n", cs, t, diff)
+		lt = "S"
 	}
+
+	startlist_db.UpdateFlightDetails(id, t, lt, 0)
+	return lt
 }
 
-func detectTow(id string, t time.Time) bool {
-	last_id := startlist_db.GetRecentParallelStart(id, t)
+func detectTow(id string, t time.Time, dt time.Time, cs string) bool {
+	last_id := startlist_db.GetRecentParallelStart(id, dt)
 	if last_id != "" {
-		alts1 := startlist_db.GetRecentAvgAltitude(id, t)
-		alts2 := startlist_db.GetRecentAvgAltitude(last_id, t)
+		alts1 := startlist_db.GetRecentAvgAltitude(id, dt)
+		alts2 := startlist_db.GetRecentAvgAltitude(last_id, dt)
 
 		diff := math.Abs(alts2 - alts1)
 
-		fmt.Printf("    %s started in parallel with %s - h diff %f\n", id, last_id, diff)
+		//fmt.Printf("    %s started in parallel with %s - h diff %f\n", id, last_id, diff)
 		if diff < tow_threshold {
 			return true
 		}
@@ -105,7 +125,7 @@ func near_coordinates(lat float64, lon float64) bool {
 	}
 }
 
-func near_altitude(a float64) bool {
+func near_ground(a float64) bool {
 	if a > home_elevation-elevation_threshold && a < home_elevation+elevation_threshold {
 		return true
 	} else {
