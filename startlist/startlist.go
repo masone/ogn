@@ -29,10 +29,10 @@ func Init() {
 	fmt.Println("")
 }
 
-func ProcessEntry(t time.Time, id string, cs string, lat float64, lon float64, alt float64, climb_rate float64) {
+func ProcessEntry(ft time.Time, id string, cs string, lat float64, lon float64, alt float64, climb_rate float64) {
 	//plane := geo.NewPoint(lat, lon)
 	//fmt.Printf("    %s - %fkm away - %fm\n", cs, home_point.GreatCircleDistance(plane), alt)
-
+	t := packetTime(ft)
 	var pos string
 	nc := near_coordinates(lat, lon)
 	ng := near_ground(alt)
@@ -131,4 +131,16 @@ func near_ground(a float64) bool {
 	} else {
 		return false
 	}
+}
+
+// The Flarm timestamp uses a Hours/Minutes/Seconds format. The date is not passed explicitely.
+// libfap-go messes up when converting this to a time, resulting in the correct time for different dates.
+func packetTime(t time.Time) time.Time {
+	now := time.Now()
+	hour, min, sec := t.Clock()
+	day := now.Day()
+	month := now.Month()
+	year := now.Year()
+
+	return time.Date(year, month, day, hour, min, sec, 0, time.Local)
 }
