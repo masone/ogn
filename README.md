@@ -1,6 +1,41 @@
 ## Purpose
 
-Automated detection of starts and landings on a defined airfield by processing the APRS traffic from the [Open Glider Network OGN](glidernet.org).
+Automated detection of starts and landings on a defined airfield by processing the APRS traffic from the (Open Glider Network OGN)[http://glidernet.org].
+Work in progress.
+
+
+## Features
+
+- Detection of starts and landings
+- Calculation of total flight time
+- Detection of launch type (winch, tow, self start)
+
+
+## Notes
+
+Here's a few things you should know.
+
+### Coverage
+
+The (coverage tool)[http://ognrange.onglide.com/] displays the theoretical range of receivers.
+Make sure your airfield is covered by a nearby receiver and not in a dead spot.
+
+### Tracked aircrafts
+
+This tool only tracks aircrafts which are FLARM equipped and found in the (OGN devices database)[http://ddb.glidernet.org/].
+Yes, this also includes your tow plane.
+
+### Accuracy
+
+Please note that the detected start and landing times are approximate only. Due to several technical reasons,
+you have to expect a small offset from the real start time. In my experience, they're no more than 1-2 minutes off.
+
+### Default constants
+
+There are a few constants in the code. They work very well for the airfield I am tracking
+but might need some tweaking if yours is substantially different. The same goes for
+the detection of the start type. The constants work well for our tow plane type and winch cord length.
+
 
 ## Installation
 
@@ -26,7 +61,7 @@ Create a new app with postgres activated and install the buildkits plugin
 
 ```
 heroku create your_tracker
-hheroku addons:create heroku-postgresql
+heroku addons:create heroku-postgresql
 heroku plugins:install https://github.com/heroku/heroku-buildkits
 heroku buildkits:set https://github.com/ddollar/heroku-buildpack-multi.git
 ```
