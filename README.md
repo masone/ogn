@@ -1,6 +1,6 @@
 ## Purpose
 
-Automated detection of starts and landings on a defined airfield by processing the APRS traffic from the (Open Glider Network OGN)[http://glidernet.org].
+Automated detection of starts and landings on a defined airfield by processing the APRS traffic from the [Open Glider Network OGN](http://glidernet.org).
 Work in progress.
 
 
@@ -17,12 +17,12 @@ Here's a few things you should know.
 
 ### Coverage
 
-The (coverage tool)[http://ognrange.onglide.com/] displays the theoretical range of receivers.
+The [coverage tool](http://ognrange.onglide.com/) displays the theoretical range of receivers.
 Make sure your airfield is covered by a nearby receiver and not in a dead spot.
 
 ### Tracked aircrafts
 
-This tool only tracks aircrafts which are FLARM equipped and found in the (OGN devices database)[http://ddb.glidernet.org/].
+This tool only tracks aircrafts which are FLARM equipped and found in the [OGN devices database](http://ddb.glidernet.org/).
 Yes, this also includes your tow plane.
 
 ### Accuracy
